@@ -13,6 +13,7 @@ struct ConfigGuardView: View {
                     .foregroundStyle(.purple)
                 Text("Config Guard")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .configGuard)
                 Spacer()
 
                 if viewModel.isScanning {
@@ -59,6 +60,7 @@ struct ConfigGuardView: View {
             }
         }
         .task {
+            viewModel.loadCached()
             await viewModel.scan()
         }
     }
@@ -124,8 +126,7 @@ struct ConfigGuardView: View {
             .width(25)
 
             TableColumn("File") { entry in
-                Text(entry.filePath)
-                    .font(.system(.body, design: .monospaced))
+                ClickablePath(path: entry.filePath, font: .system(.body, design: .monospaced))
             }
             .width(min: 180, ideal: 250)
 

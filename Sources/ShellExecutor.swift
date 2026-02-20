@@ -33,6 +33,7 @@ struct ShellExecutor: Sendable {
     static func run(
         _ command: String,
         arguments: [String] = [],
+        workingDirectory: String? = nil,
         timeout: Timeout = .local
     ) -> Result {
         let process = Process()
@@ -41,6 +42,9 @@ struct ShellExecutor: Sendable {
 
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = arguments
+        if let dir = workingDirectory {
+            process.currentDirectoryURL = URL(fileURLWithPath: dir)
+        }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 

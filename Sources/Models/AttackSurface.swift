@@ -101,3 +101,15 @@ struct ExposedService: Identifiable, Sendable {
     let description: String
     let howToDisable: String
 }
+
+// MARK: - Sharing Services
+
+struct SharingService: Identifiable, Sendable {
+    let id = UUID()
+    let name: String
+    let isEnabled: Bool
+    let risk: PortRisk
+    let description: String
+    let howToDisable: String
+    let configDetail: String
+}

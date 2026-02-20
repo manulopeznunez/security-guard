@@ -3,7 +3,7 @@ import os.log
 
 // MARK: - Public Types
 
-struct CVERecord: Sendable, Identifiable {
+struct CVERecord: Sendable, Identifiable, Codable {
     let id: String
     let aliases: [String]
     let summary: String
@@ -15,7 +15,7 @@ struct CVERecord: Sendable, Identifiable {
     }
 }
 
-enum CVESeverity: Int, Comparable, Sendable {
+enum CVESeverity: Int, Comparable, Sendable, Codable {
     case unknown = 0
     case low = 1
     case medium = 2

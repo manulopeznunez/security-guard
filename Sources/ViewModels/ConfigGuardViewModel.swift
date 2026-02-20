@@ -64,6 +64,35 @@ final class ConfigGuardViewModel {
 
         let flagged = result.filter(\.needsReview).map(\.approvalID)
         ApprovalManager.recordScanResults(.configGuard, flaggedIDs: flagged)
+
+        Self.saveScanCache(result)
+        ScanDateTracker.record(.configGuard)
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "configGuard", total: result.count, flagged: flagged.count,
+            summary: "\(result.count) files, \(flagged.count) need review"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadScanCache() { entries = cached }
+    }
+
+    // MARK: - Scan Result Cache
+
+    nonisolated private static var scanCacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("config-guard-cache.json")
+    }
+
+    nonisolated private static func saveScanCache(_ result: [ConfigGuardEntry]) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: scanCacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadScanCache() -> [ConfigGuardEntry]? {
+        guard let data = try? Data(contentsOf: scanCacheURL) else { return nil }
+        return try? JSONDecoder().decode([ConfigGuardEntry].self, from: data)
     }
 
     // MARK: - Approve change (save new baseline for one file)

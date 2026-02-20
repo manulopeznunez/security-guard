@@ -16,6 +16,7 @@ struct ChromeExtensionView: View {
                     .foregroundStyle(.blue)
                 Text("Chrome Extensions")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .chromeExtensions)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()
@@ -155,8 +156,7 @@ struct ChromeExtensionView: View {
                                 .clipShape(Capsule())
 
                             // Source pill
-                            Text(ext.source)
-                                .font(.caption2)
+                            ClickablePath(path: ext.source, font: .caption2)
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -315,6 +315,7 @@ struct ChromeExtensionView: View {
             }
         }
         .task {
+            viewModel.loadCached()
             await viewModel.scan()
         }
         .alert("Quarantine this item?",

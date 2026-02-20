@@ -18,6 +18,35 @@ final class PersistenceScannerViewModel {
         // Cache flagged items for Security Status
         let flagged = results.filter(\.needsReview).map(\.executablePath)
         ApprovalManager.recordScanResults(.persistence, flaggedIDs: flagged)
+
+        Self.saveCachedResult(results)
+        ScanDateTracker.record(.persistence)
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "persistence", total: results.count, flagged: flagged.count,
+            summary: "\(results.count) items, \(flagged.count) need review"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadCachedResult() { items = cached }
+    }
+
+    // MARK: - JSON Cache
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("persistence-cache.json")
+    }
+
+    nonisolated private static func saveCachedResult(_ result: [PersistenceEntry]) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> [PersistenceEntry]? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode([PersistenceEntry].self, from: data)
     }
 
     nonisolated static func performScan() async -> [PersistenceEntry] {

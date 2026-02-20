@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum ExtensionRisk: Int, Comparable, Sendable {
+enum ExtensionRisk: Int, Comparable, Sendable, Codable {
     case low = 0
     case medium = 1
     case high = 2
@@ -26,8 +26,13 @@ enum ExtensionRisk: Int, Comparable, Sendable {
     }
 }
 
-struct ChromeExtensionEntry: Identifiable, Sendable {
+struct ChromeExtensionEntry: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case name, extensionId, version, description, permissions, hostPermissions
+        case profile, risk, riskReasons, isFromWebStore, source, author, homepageURL, profileDisplayName
+    }
     let name: String
     let extensionId: String
     let version: String

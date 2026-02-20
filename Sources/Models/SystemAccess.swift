@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Access Risk
 
-enum AccessRisk: Int, Comparable, Sendable {
+enum AccessRisk: Int, Comparable, Sendable, Codable {
     case safe = 0
     case warning = 1
     case suspicious = 2
@@ -30,8 +30,12 @@ enum AccessRisk: Int, Comparable, Sendable {
 
 // MARK: - Sudo Entry
 
-struct SudoEntry: Identifiable, Sendable {
+struct SudoEntry: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case rule, user, hasNOPASSWD, commands, source, risk, riskReason
+    }
     let rule: String
     let user: String
     let hasNOPASSWD: Bool
@@ -51,8 +55,12 @@ struct SudoEntry: Identifiable, Sendable {
 
 // MARK: - User Account Entry
 
-struct UserAccountEntry: Identifiable, Sendable {
+struct UserAccountEntry: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case username, uid, fullName, homeDirectory, shell, isAdmin, isHidden, isGuest, risk, riskReason
+    }
     let username: String
     let uid: Int
     let fullName: String
@@ -75,8 +83,12 @@ struct UserAccountEntry: Identifiable, Sendable {
 
 // MARK: - Group Entry
 
-struct GroupEntry: Identifiable, Sendable {
+struct GroupEntry: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case name, gid, members, isSensitive, risk, riskReason, actionHint
+    }
     let name: String
     let gid: Int
     let members: [String]
@@ -88,7 +100,7 @@ struct GroupEntry: Identifiable, Sendable {
 
 // MARK: - Config Guard
 
-enum ConfigChangeType: String, Sendable {
+enum ConfigChangeType: String, Sendable, Codable {
     case unchanged = "Unchanged"
     case modified = "Modified"
     case newFile = "New File"
@@ -106,8 +118,13 @@ enum ConfigChangeType: String, Sendable {
     }
 }
 
-struct ConfigGuardEntry: Identifiable, Sendable {
+struct ConfigGuardEntry: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case filePath, absolutePath, exists, currentHash, baselineHash, permissions
+        case changeType, risk, riskReason
+    }
     let filePath: String
     let absolutePath: String
     let exists: Bool

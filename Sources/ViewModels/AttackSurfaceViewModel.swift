@@ -13,6 +13,9 @@ final class AttackSurfaceViewModel {
     // Sub-tab 3: Exposed Services
     var exposedServices: [ExposedService] = []
 
+    // Sub-tab 4: Sharing
+    var sharingServices: [SharingService] = []
+
     var isScanning = false
     var progress = ""
 
@@ -61,7 +64,8 @@ final class AttackSurfaceViewModel {
                 let (risk, reason) = DatabaseManager.classifyPortRisk(
                     port: current.localPort,
                     processName: current.processName,
-                    signature: current.parentSignature
+                    signature: current.parentSignature,
+                    localAddress: current.localAddress
                 )
                 listeningPorts.append(ListeningPortSummary(
                     localPort: current.localPort,
@@ -322,6 +326,126 @@ final class AttackSurfaceViewModel {
         return services.sorted { $0.risk > $1.risk }
     }
 
+    // MARK: - Sharing Preferences
+
+    func scanSharing() async {
+        isScanning = true
+        progress = "Auditing sharing preferences..."
+        let result = await Task.detached {
+            Self.detectSharingServices()
+        }.value
+        sharingServices = result
+        isScanning = false
+        progress = ""
+    }
+
+    nonisolated private static func detectSharingServices() -> [SharingService] {
+        var services: [SharingService] = []
+
+        let osVersion = ShellExecutor.run("/usr/bin/sw_vers", arguments: ["-productVersion"])
+            .output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. AirPlay Receiver (port 5000)
+        let airplayListening = ShellExecutor.shell(
+            "lsof +c 0 -i :5000 -n -P 2>/dev/null | grep -i ControlCenter | grep LISTEN"
+        )
+        let airplayOn = !airplayListening.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if airplayOn {
+            let cves = SystemCVEDatabase.vulnerabilities(for: "AirPlay Receiver", osVersion: osVersion)
+            let risk: PortRisk = cves.isEmpty ? .safe : (cves.contains { $0.wormable } ? .dangerous : .warning)
+            services.append(SharingService(
+                name: "AirPlay Receiver",
+                isEnabled: true,
+                risk: risk,
+                description: cves.isEmpty
+                    ? "Allows other Apple devices to stream to this Mac."
+                    : "\(cves.count) unpatched CVE\(cves.count == 1 ? "" : "s"): \(cves.map(\.id).joined(separator: ", "))",
+                howToDisable: "System Settings > General > AirDrop & Handoff > AirPlay Receiver > Off",
+                configDetail: "Ports 5000/7000 listening on all interfaces"
+            ))
+        }
+
+        // 2. Remote Login (SSH)
+        let sshResult = ShellExecutor.shell("lsof -i :22 -n -P 2>/dev/null | grep LISTEN")
+        if !sshResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            services.append(SharingService(
+                name: "Remote Login (SSH)",
+                isEnabled: true,
+                risk: .dangerous,
+                description: "Allows remote terminal access. Should be OFF unless actively needed.",
+                howToDisable: "System Settings > General > Sharing > Remote Login > Off",
+                configDetail: "Port 22 listening"
+            ))
+        }
+
+        // 3. Screen Sharing (VNC)
+        let vncResult = ShellExecutor.shell("lsof -i :5900 -n -P 2>/dev/null | grep LISTEN")
+        if !vncResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            services.append(SharingService(
+                name: "Screen Sharing (VNC)",
+                isEnabled: true,
+                risk: .dangerous,
+                description: "Remote desktop control. Exposes your screen to network users.",
+                howToDisable: "System Settings > General > Sharing > Screen Sharing > Off",
+                configDetail: "Port 5900 listening"
+            ))
+        }
+
+        // 4. File Sharing (SMB)
+        let smbResult = ShellExecutor.shell("lsof -i :445 -n -P 2>/dev/null | grep LISTEN")
+        if !smbResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            services.append(SharingService(
+                name: "File Sharing (SMB)",
+                isEnabled: true,
+                risk: .warning,
+                description: "Shares files over the network via SMB protocol.",
+                howToDisable: "System Settings > General > Sharing > File Sharing > Off",
+                configDetail: "Port 445 listening"
+            ))
+        }
+
+        // 5. Remote Management (ARD)
+        let ardResult = ShellExecutor.shell("lsof -i :3283 -n -P 2>/dev/null | grep LISTEN")
+        if !ardResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            services.append(SharingService(
+                name: "Remote Management",
+                isEnabled: true,
+                risk: .dangerous,
+                description: "Apple Remote Desktop agent. Allows full remote control and file transfer.",
+                howToDisable: "System Settings > General > Sharing > Remote Management > Off",
+                configDetail: "Port 3283 listening"
+            ))
+        }
+
+        // 6. Internet Sharing
+        let internetSharing = ShellExecutor.shell("pgrep -x InternetSharing 2>/dev/null")
+        if internetSharing.exitCode == 0 {
+            services.append(SharingService(
+                name: "Internet Sharing",
+                isEnabled: true,
+                risk: .warning,
+                description: "Shares your internet connection. Runs DHCP/DNS servers.",
+                howToDisable: "System Settings > General > Sharing > Internet Sharing > Off",
+                configDetail: "InternetSharing process running"
+            ))
+        }
+
+        // 7. Content Caching
+        let contentCaching = ShellExecutor.shell("pgrep -x AssetCache 2>/dev/null")
+        if contentCaching.exitCode == 0 {
+            services.append(SharingService(
+                name: "Content Caching",
+                isEnabled: true,
+                risk: .safe,
+                description: "Caches Apple software updates and iCloud content for local devices.",
+                howToDisable: "System Settings > General > Sharing > Content Caching > Off",
+                configDetail: "AssetCache process running"
+            ))
+        }
+
+        return services.sorted { $0.risk > $1.risk }
+    }
+
     // MARK: - Scan All
 
     func scanAll() async {
@@ -329,7 +453,16 @@ final class AttackSurfaceViewModel {
         await refreshPorts()
         await scanSSH()
         await scanServices()
+        await scanSharing()
         isScanning = false
+        ScanDateTracker.record(.attackSurface)
+        let totalPorts = listeningPorts.count
+        let flaggedPorts = listeningPorts.filter(\.needsReview).count
+        let exposedCount = exposedServices.count
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "attackSurface", total: totalPorts + exposedCount, flagged: flaggedPorts + exposedCount,
+            summary: "\(totalPorts) ports, \(exposedCount) exposed services, \(flaggedPorts) flagged"
+        )
     }
 
     // MARK: - Purge

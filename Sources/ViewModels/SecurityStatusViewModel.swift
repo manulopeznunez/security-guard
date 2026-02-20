@@ -145,6 +145,38 @@ final class SecurityStatusViewModel {
             category: .builtIn
         ))
 
+        // OS Patch Level
+        let osVersionResult = ShellExecutor.run("/usr/bin/sw_vers", arguments: ["-productVersion"])
+        let currentOSVersion = osVersionResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patchCheck = SystemCVEDatabase.checkOSPatchLevel(currentOSVersion)
+        if let minimum = patchCheck.minimumRequired {
+            results.append(SecurityItem(
+                name: "macOS Patch Level",
+                explanation: "Checks if your macOS version has the latest security patches. Outdated versions may have known vulnerabilities including remote code execution (e.g., AirBorne CVE-2025-24252).",
+                howToUse: patchCheck.isSafe
+                    ? "Your macOS is up to date. Continue installing updates promptly when available."
+                    : "Go to System Settings > General > Software Update and install the latest macOS update. You need at least macOS \(minimum).",
+                description: patchCheck.isSafe
+                    ? "macOS \(currentOSVersion) — up to date"
+                    : "macOS \(currentOSVersion) — outdated (need \(minimum)+)",
+                status: patchCheck.isSafe ? .enabled : .disabled,
+                action: patchCheck.isSafe
+                    ? .none
+                    : .openSystemSettings(path: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"),
+                category: .builtIn
+            ))
+        } else if !currentOSVersion.isEmpty {
+            results.append(SecurityItem(
+                name: "macOS Patch Level",
+                explanation: "Checks if your macOS version has the latest security patches.",
+                howToUse: "Your macOS version is not in our known-safe database. Check System Settings > Software Update manually.",
+                description: "macOS \(currentOSVersion) — not in known database",
+                status: .unknown,
+                action: .openSystemSettings(path: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"),
+                category: .builtIn
+            ))
+        }
+
         // LuLu
         let luluInstalled = FileManager.default.fileExists(atPath: "/Applications/LuLu.app")
         let lulu = ShellExecutor.run("/usr/bin/pgrep", arguments: ["-x", "LuLu"])
@@ -261,77 +293,112 @@ final class SecurityStatusViewModel {
             category: .process,
             name: "Unsigned Processes",
             explanation: "Processes running without a valid code signature could be modified binaries or unknown software.",
-            howToUse: "Go to the 'Processes' tab and scan. Unsigned processes show an Approve button. Review the path and name, then approve if you recognize it."
+            howToUse: "Go to the 'Processes' tab and scan. Unsigned processes show an Approve button. Review the path and name, then approve if you recognize it.",
+            targetTab: .processes
         )
 
         appendCachedCard(&results,
             category: .persistence,
             name: "Unsigned Persistence Items",
             explanation: "Launch agents, daemons, or login items without valid signatures could be malware that survives reboots.",
-            howToUse: "Go to the 'Persistence' tab and scan. Flagged items show an Approve button. Review the label and executable path, then approve if you recognize it."
+            howToUse: "Go to the 'Persistence' tab and scan. Flagged items show an Approve button. Review the label and executable path, then approve if you recognize it.",
+            targetTab: .persistence
         )
 
         appendCachedCard(&results,
             category: .appSignature,
             name: "Invalid App Signatures",
             explanation: "Apps in /Applications with broken or missing code signatures may have been tampered with or are unsigned builds.",
-            howToUse: "Go to the 'App Signatures' tab and scan. Invalid apps show an Approve button. Review the app name and authority, then approve if you trust it."
+            howToUse: "Go to the 'App Signatures' tab and scan. Invalid apps show an Approve button. Review the app name and authority, then approve if you trust it.",
+            targetTab: .appSignatures
         )
 
         appendCachedCard(&results,
-            category: .chromeExtension,
-            name: "Chrome Extensions Audit",
-            explanation: "Browser extensions are the #1 blind spot. A malicious extension runs INSIDE Chrome with Chrome's signature — invisible to process scanners.",
-            howToUse: "Go to the 'Extensions' tab to review each HIGH risk extension. Press 'Approve' once you verify it's legitimate."
+            category: .browserExtension,
+            name: "Browser Extensions Audit",
+            explanation: "Browser extensions are the #1 blind spot. A malicious extension runs INSIDE the browser with the browser's signature — invisible to process scanners. Covers Chrome, Safari, and Firefox.",
+            howToUse: "Go to the 'Extensions' tab to review each HIGH risk extension. Press 'Approve' once you verify it's legitimate.",
+            targetTab: .extensions
         )
 
         appendCachedCard(&results,
             category: .networkMonitor,
             name: "Network-Active Process Flags",
             explanation: "Processes with active network connections that are unsigned, have no known parent, or show signs of dylib injection. These could indicate compromised or suspicious software communicating over the network.",
-            howToUse: "Go to 'Network History' > 'By App' tab. Click the info button on flagged processes (red icons). Review the process chain, injection risk, and trace. Press 'Mark as Reviewed' if you trust the process."
+            howToUse: "Go to 'Network History' > 'By App' tab. Click the info button on flagged processes (red icons). Review the process chain, injection risk, and trace. Press 'Mark as Reviewed' if you trust the process.",
+            targetTab: .history
         )
 
         appendCachedCard(&results,
             category: .homebrew,
             name: "Homebrew Package Health",
             explanation: "Outdated Homebrew packages may contain known security vulnerabilities. Critical tools like git, openssl, and curl should always be current.",
-            howToUse: "Go to the 'Homebrew' tab and scan. Outdated packages show an Approve button if you accept the risk, or use the update button to upgrade them."
+            howToUse: "Go to the 'Homebrew' tab and scan. Outdated packages show an Approve button if you accept the risk, or use the update button to upgrade them.",
+            targetTab: .homebrew
         )
 
         appendCachedCard(&results,
             category: .attackSurface,
             name: "Attack Surface (Listening Ports)",
             explanation: "Ports open for incoming connections represent your attack surface. Dangerous ports (SSH, VNC, SMB) or unsigned processes listening on any port need review.",
-            howToUse: "Go to the 'Surface' tab to see all listening ports, SSH key audit, and exposed services. Approve ports you expect to be open."
+            howToUse: "Go to the 'Surface' tab to see all listening ports, SSH key audit, and exposed services. Approve ports you expect to be open.",
+            targetTab: .attackSurface
         )
 
         appendCachedCard(&results,
             category: .tccPermission,
             name: "TCC Permissions Audit",
             explanation: "Apps with Full Disk Access, Accessibility, Camera, or Screen Recording. Non-Apple apps with dangerous permissions could be spyware.",
-            howToUse: "Go to 'Permissions' tab > 'TCC Permissions'. Review non-Apple apps with dangerous access."
+            howToUse: "Go to 'Permissions' tab > 'TCC Permissions'. Review non-Apple apps with dangerous access.",
+            targetTab: .permissions
         )
 
         appendCachedCard(&results,
             category: .sudoConfig,
             name: "Sudo Configuration",
             explanation: "Sudo rules allowing root access. NOPASSWD entries allow passwordless root, dangerous with AI agents.",
-            howToUse: "Go to 'Permissions' > 'Sudo Config'. Review NOPASSWD entries and unexpected rules."
+            howToUse: "Go to 'Permissions' > 'Users & Groups'. Scroll to the Sudo Rules section. Review NOPASSWD entries.",
+            targetTab: .permissions
         )
 
         appendCachedCard(&results,
             category: .usersGroups,
             name: "Users & Groups Audit",
             explanation: "Local accounts. Unexpected admin users or UID 0 accounts could indicate compromise.",
-            howToUse: "Go to 'Permissions' > 'Users & Groups'. Review admin users and check for unknowns."
+            howToUse: "Go to 'Permissions' > 'Users & Groups'. Review admin users and check for unknowns.",
+            targetTab: .permissions
         )
 
         appendCachedCard(&results,
             category: .configGuard,
             name: "Config File Integrity",
             explanation: "Tracks dotfile changes (.zshrc, .gitconfig, .ssh/config). AI agents may modify these silently.",
-            howToUse: "Go to 'Config Guard' tab. Set a baseline, then review any changes after agent sessions."
+            howToUse: "Go to 'Config Guard' tab. Set a baseline, then review any changes after agent sessions.",
+            targetTab: .configGuard
+        )
+
+        appendCachedCard(&results,
+            category: .exposure,
+            name: "System Exposure",
+            explanation: "Checks Wi-Fi security, Bluetooth, Sharing Services, DNS, Kernel and System Extensions for misconfigurations that increase your attack surface.",
+            howToUse: "Go to the 'Exposure' tab to review flagged items. Fix issues like AirDrop set to Everyone, discoverable Bluetooth, or unencrypted DNS.",
+            targetTab: .exposure
+        )
+
+        appendCachedCard(&results,
+            category: .devDeps,
+            name: "Dev Dependencies Audit",
+            explanation: "Scans npm, pip, and cargo projects for known vulnerabilities using native audit tools.",
+            howToUse: "Go to the 'DevDeps' tab to see projects with vulnerable dependencies. Update affected packages.",
+            targetTab: .devDeps
+        )
+
+        appendCachedCard(&results,
+            category: .breachCheck,
+            name: "Data Breach Check",
+            explanation: "Checks your email accounts against known data breaches using the Have I Been Pwned API.",
+            howToUse: "Go to the 'Breaches' tab, set up your HIBP API key, and scan. Review breaches exposing passwords or credit cards.",
+            targetTab: .breaches
         )
 
         // Remote Login (SSH) — check if sshd is listening on port 22
@@ -359,7 +426,8 @@ final class SecurityStatusViewModel {
         category: ApprovalManager.Category,
         name: String,
         explanation: String,
-        howToUse: String
+        howToUse: String,
+        targetTab: TabSection? = nil
     ) {
         guard ApprovalManager.hasBeenScanned(category) else {
             // Never scanned — show "not scanned yet" card
@@ -370,7 +438,8 @@ final class SecurityStatusViewModel {
                 description: "Not scanned yet — run a scan from the corresponding tab",
                 status: .disabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
             return
         }
@@ -388,7 +457,8 @@ final class SecurityStatusViewModel {
                 description: "Last scan: all clear",
                 status: .enabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
         } else if quarantined > 0 && pending > 0 {
             results.append(SecurityItem(
@@ -398,7 +468,8 @@ final class SecurityStatusViewModel {
                 description: "\(pending) pending review, \(quarantined) quarantined",
                 status: .disabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
         } else if quarantined > 0 {
             results.append(SecurityItem(
@@ -408,7 +479,8 @@ final class SecurityStatusViewModel {
                 description: "\(quarantined) quarantined, rest approved",
                 status: .disabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
         } else if pending > 0 {
             results.append(SecurityItem(
@@ -418,7 +490,8 @@ final class SecurityStatusViewModel {
                 description: "\(pending) item\(pending == 1 ? "" : "s") pending review",
                 status: .disabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
         } else {
             results.append(SecurityItem(
@@ -428,7 +501,8 @@ final class SecurityStatusViewModel {
                 description: "\(flagged.count) item\(flagged.count == 1 ? "" : "s") reviewed and approved",
                 status: .enabled,
                 action: .none,
-                category: .blindSpots
+                category: .blindSpots,
+                targetTab: targetTab
             ))
         }
     }
@@ -454,10 +528,10 @@ final class SecurityStatusViewModel {
         let flaggedApps = appResults.filter { !$0.isValid }.map(\.appPath)
         ApprovalManager.recordScanResults(.appSignature, flaggedIDs: flaggedApps)
 
-        actionInProgress = "Scanning Chrome extensions..."
-        let extResults = ChromeExtensionViewModel.performScan()
-        let flaggedExts = extResults.filter { $0.risk == .high }.map(\.extensionId)
-        ApprovalManager.recordScanResults(.chromeExtension, flaggedIDs: flaggedExts)
+        actionInProgress = "Scanning browser extensions..."
+        let extResults = BrowserExtensionViewModel.performScan()
+        let flaggedExts = extResults.filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.browserExtension, flaggedIDs: flaggedExts)
 
         if FileManager.default.isExecutableFile(
             atPath: "/Applications/KnockKnock.app/Contents/MacOS/KnockKnock"
@@ -496,6 +570,20 @@ final class SecurityStatusViewModel {
         let configResult = await ConfigGuardViewModel.performScan()
         let flaggedConfig = configResult.filter(\.needsReview).map(\.approvalID)
         ApprovalManager.recordScanResults(.configGuard, flaggedIDs: flaggedConfig)
+
+        actionInProgress = "Scanning system exposure..."
+        let exposureResults = await Task.detached { ExposureViewModel.performScan() }.value
+        let flaggedExposure = exposureResults.filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.exposure, flaggedIDs: flaggedExposure)
+        ScanDateTracker.record(.exposure)
+
+        actionInProgress = "Auditing dev dependencies..."
+        let devDepsResults = await Task.detached { DevDepsViewModel.performScan() }.value
+        let flaggedDevDeps = devDepsResults.flatMap(\.vulnerabilities).filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.devDeps, flaggedIDs: flaggedDevDeps)
+        ScanDateTracker.record(.devDeps)
+
+        // Breach check skipped in scanAll — requires HIBP API key and rate-limited requests
 
         actionInProgress = nil
         await refresh()

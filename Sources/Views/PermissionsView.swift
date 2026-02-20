@@ -3,11 +3,11 @@ import SwiftUI
 struct PermissionsView: View {
     @State private var viewModel = PermissionsViewModel()
     @State private var selectedTab = 0
+    @State private var tccViewMode = 0
     @State private var approvalVersion = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
             HStack {
                 Image(systemName: "lock.shield")
                     .font(.title)
@@ -36,14 +36,12 @@ struct PermissionsView: View {
 
             Divider()
 
-            // Sub-tabs
             Picker("View", selection: $selectedTab) {
                 Text("TCC Permissions").tag(0)
-                Text("Sudo Config").tag(1)
-                Text("Users & Groups").tag(2)
+                Text("Users & Groups").tag(1)
             }
             .pickerStyle(.segmented)
-            .frame(width: 450)
+            .frame(width: 300)
             .padding(.horizontal)
             .padding(.vertical, 6)
 
@@ -51,17 +49,17 @@ struct PermissionsView: View {
 
             switch selectedTab {
             case 0: tccTab
-            case 1: sudoTab
-            case 2: usersTab
+            case 1: usersTab
             default: EmptyView()
             }
         }
         .task {
+            viewModel.loadCached()
             await viewModel.scanAll()
         }
     }
 
-    // MARK: - Tab 1: TCC Permissions
+    // MARK: - TCC Tab
 
     @ViewBuilder
     private var tccTab: some View {
@@ -78,26 +76,53 @@ struct PermissionsView: View {
         } else {
             tccSummaryBar
             Divider()
-            tccTable
+            if tccViewMode == 0 {
+                tccTable
+            } else {
+                tccByAppView
+            }
         }
     }
 
     private var tccSummaryBar: some View {
-        HStack(spacing: 20) {
-            let total = viewModel.tccEntries.count
-            let dangerous = viewModel.tccEntries.filter { $0.risk == .dangerous }.count
-            let warning = viewModel.tccEntries.filter { $0.risk == .warning }.count
-            let safe = viewModel.tccEntries.filter { $0.risk == .safe }.count
+        HStack(spacing: 12) {
+            Picker("Mode", selection: $tccViewMode) {
+                Text("By Service").tag(0)
+                Text("By App").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 200)
 
-            summaryPill("Total: \(total)", color: .secondary)
-            summaryPill("Dangerous: \(dangerous)", color: .red)
-            summaryPill("Warning: \(warning)", color: .orange)
-            summaryPill("Safe: \(safe)", color: .green)
+            Divider().frame(height: 20)
+
+            if tccViewMode == 0 {
+                let total = viewModel.tccEntries.count
+                let dangerous = viewModel.tccEntries.filter { $0.risk == .dangerous }.count
+                let warning = viewModel.tccEntries.filter { $0.risk == .warning }.count
+                let safe = viewModel.tccEntries.filter { $0.risk == .safe }.count
+                let recent = viewModel.tccEntries.filter(\.isRecentlyGranted).count
+
+                summaryPill("Total: \(total)", color: .secondary)
+                summaryPill("Dangerous: \(dangerous)", color: .red)
+                summaryPill("Warning: \(warning)", color: .orange)
+                summaryPill("Safe: \(safe)", color: .green)
+                if recent > 0 { summaryPill("Recent: \(recent)", color: .purple) }
+            } else {
+                let groups = viewModel.tccAppGroups
+                summaryPill("Apps: \(groups.count)", color: .secondary)
+                let high = groups.filter(\.hasHighExposure).count
+                if high > 0 { summaryPill("High Exposure: \(high)", color: .red) }
+                let recent = groups.reduce(0) { $0 + $1.recentCount }
+                if recent > 0 { summaryPill("Recently Granted: \(recent)", color: .purple) }
+            }
+
             Spacer()
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
     }
+
+    // MARK: - TCC By Service Table
 
     private var tccTable: some View {
         Table(viewModel.tccEntries) {
@@ -116,21 +141,32 @@ struct PermissionsView: View {
 
             TableColumn("App") { entry in
                 HStack(spacing: 4) {
+                    if let iconData = entry.appIconData, let nsImage = NSImage(data: iconData) {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .frame(width: 16, height: 16)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
                     if let signed = entry.isSigned {
                         Image(systemName: signed ? "checkmark.seal.fill" : "xmark.seal.fill")
                             .foregroundStyle(signed ? .green : .red)
                             .font(.caption2)
                             .help(signed ? "Valid code signature" : "Unsigned or invalid signature")
-                    } else {
-                        Image(systemName: "questionmark.circle")
-                            .foregroundStyle(.secondary)
-                            .font(.caption2)
-                            .help("Signature not checked")
                     }
-                    Text(entry.client)
-                        .font(.system(.caption, design: .monospaced))
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(entry.appName)
+                            .font(.caption)
+                            .lineLimit(1)
+                        if entry.appName != entry.client {
+                            Text(entry.client)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    if entry.isRecentlyGranted { newBadge }
                 }
+                .help(entry.permissionExplanation)
             }
             .width(min: 200, ideal: 300)
 
@@ -150,55 +186,148 @@ struct PermissionsView: View {
 
             TableColumn("") { entry in
                 let _ = approvalVersion
-                if entry.needsReview {
-                    let approved = ApprovalManager.isApproved(.tccPermission, id: entry.approvalID)
-                    HStack(spacing: 3) {
-                        Button(approved ? "Revoke" : "Approve") {
-                            if approved {
-                                ApprovalManager.revoke(.tccPermission, id: entry.approvalID)
-                            } else {
-                                ApprovalManager.approve(.tccPermission, id: entry.approvalID)
-                            }
-                            approvalVersion += 1
-                        }
-                        .font(.caption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .tint(approved ? .red : .green)
-
-                        if let anchor = entry.privacySettingsAnchor {
-                            Button("Disallow") {
-                                openPrivacySettings(anchor: anchor)
-                            }
-                            .font(.caption)
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .tint(.red)
-                            .help("Open System Settings to revoke this permission")
-                        }
-
-                        Button("Ask Claude") {
-                            investigateTCC(entry)
-                        }
-                        .font(.caption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                    }
-                }
+                if entry.needsReview { tccActionButtons(entry) }
             }
             .width(230)
         }
     }
 
+    // MARK: - TCC By App View
+
+    private var tccByAppView: some View {
+        List {
+            ForEach(viewModel.tccAppGroups) { group in
+                DisclosureGroup {
+                    ForEach(group.permissions) { entry in
+                        tccPermissionRow(entry)
+                    }
+                } label: {
+                    tccAppGroupLabel(group)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private func tccAppGroupLabel(_ group: TCCAppGroup) -> some View {
+        HStack(spacing: 8) {
+            if let iconData = group.appIconData, let nsImage = NSImage(data: iconData) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .frame(width: 24, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                Image(systemName: "app.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+
+            Text(group.appName)
+                .font(.system(.body, weight: .medium))
+
+            Text("\(group.permissionCount)")
+                .font(.caption2.bold())
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.15), in: Capsule())
+
+            if group.hasHighExposure {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .help("High exposure: multiple sensitive permissions")
+            }
+            if group.recentCount > 0 { newBadge }
+
+            Spacer()
+
+            Image(systemName: "circle.fill")
+                .foregroundStyle(group.aggregateRisk.color)
+                .font(.caption2)
+        }
+    }
+
+    private func tccPermissionRow(_ entry: TCCEntry) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "circle.fill")
+                .foregroundStyle(entry.risk.color)
+                .font(.system(size: 6))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(entry.serviceFriendly)
+                        .font(.system(.callout, weight: entry.risk == .dangerous ? .semibold : .regular))
+                    if entry.isRecentlyGranted { newBadge }
+                    Text(entry.authLabel)
+                        .font(.caption)
+                        .foregroundStyle(entry.authValue == 2 ? .primary : .secondary)
+                }
+                Text(entry.permissionExplanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            let _ = approvalVersion
+            if entry.needsReview { tccActionButtons(entry) }
+        }
+        .padding(.vertical, 3)
+    }
+
+    // MARK: - TCC Shared
+
+    private func tccActionButtons(_ entry: TCCEntry) -> some View {
+        let approved = ApprovalManager.isApproved(.tccPermission, id: entry.approvalID)
+        return HStack(spacing: 3) {
+            Button(approved ? "Revoke" : "Approve") {
+                if approved {
+                    ApprovalManager.revoke(.tccPermission, id: entry.approvalID)
+                } else {
+                    ApprovalManager.approve(.tccPermission, id: entry.approvalID)
+                }
+                approvalVersion += 1
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .tint(approved ? .red : .green)
+
+            if let anchor = entry.privacySettingsAnchor {
+                Button("Disallow") {
+                    openPrivacySettings(anchor: anchor)
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .tint(.red)
+                .help("Open System Settings to revoke this permission")
+            }
+
+            Button("Ask Claude") { investigateTCC(entry) }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+        }
+    }
+
+    private var newBadge: some View {
+        Text("NEW")
+            .font(.system(size: 8, weight: .bold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Color.purple.opacity(0.2), in: Capsule())
+            .foregroundStyle(.purple)
+    }
+
     private func openPrivacySettings(anchor: String) {
         Task {
             _ = await Task.detached {
-                ShellExecutor.run(
-                    "/usr/bin/open",
-                    arguments: [
-                        "x-apple.systempreferences:com.apple.preference.security?\(anchor)",
-                    ]
-                )
+                ShellExecutor.run("/usr/bin/open", arguments: [
+                    "x-apple.systempreferences:com.apple.preference.security?\(anchor)",
+                ])
             }.value
         }
     }
@@ -206,150 +335,20 @@ struct PermissionsView: View {
     private var fdaRequiredView: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "lock.shield")
-                .font(.system(size: 48))
-                .foregroundStyle(.red)
-            Text("Full Disk Access Required")
-                .font(.headline)
-            Text(
-                "Reading TCC permissions requires Full Disk Access.\nGrant it to Security Guard in System Settings > Privacy & Security > Full Disk Access."
-            )
-            .multilineTextAlignment(.center)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: 450)
-
-            Button("Open Privacy Settings") {
-                Task {
-                    _ = await Task.detached {
-                        ShellExecutor.run(
-                            "/usr/bin/open",
-                            arguments: [
-                                "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-                            ]
-                        )
-                    }.value
-                }
-            }
-            .buttonStyle(.borderedProminent)
+            Image(systemName: "lock.shield").font(.system(size: 48)).foregroundStyle(.red)
+            Text("Full Disk Access Required").font(.headline)
+            Text("Reading TCC permissions requires Full Disk Access.\nGrant it to Security Guard in System Settings > Privacy & Security > Full Disk Access.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 450)
+            Button("Open Privacy Settings") { openPrivacySettings(anchor: "Privacy_AllFiles") }
+                .buttonStyle(.borderedProminent)
             Spacer()
         }
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - Tab 2: Sudo Config
-
-    @ViewBuilder
-    private var sudoTab: some View {
-        if viewModel.sudoEntries.isEmpty && !viewModel.isScanning {
-            VStack {
-                Spacer()
-                Image(systemName: "checkmark.shield")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.green)
-                Text("No sudo rules detected")
-                    .font(.headline)
-                Text("Standard macOS configuration with no custom sudo rules.")
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
-        } else {
-            sudoSummaryBar
-            Divider()
-            sudoTable
-        }
-    }
-
-    private var sudoSummaryBar: some View {
-        HStack(spacing: 20) {
-            let nopasswd = viewModel.sudoEntries.filter(\.hasNOPASSWD).count
-            let total = viewModel.sudoEntries.count
-            let files = viewModel.sudoEntries.filter { $0.source.hasPrefix("sudoers.d/") }.count
-
-            summaryPill("Rules: \(total)", color: .secondary)
-            if nopasswd > 0 {
-                summaryPill("NOPASSWD: \(nopasswd)", color: .red)
-            }
-            if files > 0 {
-                summaryPill("sudoers.d files: \(files)", color: .orange)
-            }
-            Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 6)
-    }
-
-    private var sudoTable: some View {
-        Table(viewModel.sudoEntries) {
-            TableColumn("") { entry in
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(entry.risk.color)
-                    .font(.caption2)
-            }
-            .width(25)
-
-            TableColumn("Rule") { entry in
-                Text(entry.rule)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(2)
-            }
-            .width(min: 250, ideal: 400)
-
-            TableColumn("Source") { entry in
-                Text(entry.source)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 100, ideal: 130)
-
-            TableColumn("NOPASSWD") { entry in
-                if entry.hasNOPASSWD {
-                    Text("YES")
-                        .font(.caption.bold())
-                        .foregroundStyle(.red)
-                }
-            }
-            .width(80)
-
-            TableColumn("Risk") { entry in
-                Text(entry.riskReason)
-                    .font(.caption)
-                    .foregroundStyle(entry.risk.color)
-            }
-            .width(min: 150, ideal: 250)
-
-            TableColumn("") { entry in
-                let _ = approvalVersion
-                if entry.needsReview {
-                    let approved = ApprovalManager.isApproved(.sudoConfig, id: entry.approvalID)
-                    HStack(spacing: 4) {
-                        Button(approved ? "Revoke" : "Approve") {
-                            if approved {
-                                ApprovalManager.revoke(.sudoConfig, id: entry.approvalID)
-                            } else {
-                                ApprovalManager.approve(.sudoConfig, id: entry.approvalID)
-                            }
-                            approvalVersion += 1
-                        }
-                        .font(.caption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .tint(approved ? .red : .green)
-
-                        Button("Ask Claude") {
-                            investigateSudo(entry)
-                        }
-                        .font(.caption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                    }
-                }
-            }
-            .width(160)
-        }
-    }
-
-    // MARK: - Tab 3: Users & Groups
+    // MARK: - Users & Groups Tab (with Sudo)
 
     @ViewBuilder
     private var usersTab: some View {
@@ -365,10 +364,11 @@ struct PermissionsView: View {
             usersSummaryBar
             Divider()
             VSplitView {
-                usersTable
-                    .frame(minHeight: 120)
-                groupsSection
-                    .frame(minHeight: 120)
+                usersTable.frame(minHeight: 120)
+                groupsSection.frame(minHeight: 100)
+                if !viewModel.sudoEntries.isEmpty {
+                    sudoSection.frame(minHeight: 100)
+                }
             }
         }
     }
@@ -378,16 +378,16 @@ struct PermissionsView: View {
             let total = viewModel.userEntries.count
             let admins = viewModel.userEntries.filter(\.isAdmin).count
             let groupWarnings = viewModel.groupEntries.filter { $0.risk != .safe }.count
+            let nopasswd = viewModel.sudoEntries.filter(\.hasNOPASSWD).count
+            let sudoersFiles = viewModel.sudoEntries.filter { $0.source.hasPrefix("sudoers.d/") }.count
 
             summaryPill("Users: \(total)", color: .secondary)
             summaryPill("Admins: \(admins)", color: admins > 1 ? .orange : .blue)
-            summaryPill(
-                "Guest: \(viewModel.guestEnabled ? "Enabled" : "Disabled")",
-                color: viewModel.guestEnabled ? .orange : .green
-            )
-            if groupWarnings > 0 {
-                summaryPill("Group Warnings: \(groupWarnings)", color: .orange)
-            }
+            summaryPill("Guest: \(viewModel.guestEnabled ? "Enabled" : "Disabled")",
+                        color: viewModel.guestEnabled ? .orange : .green)
+            if groupWarnings > 0 { summaryPill("Group Warnings: \(groupWarnings)", color: .orange) }
+            if nopasswd > 0 { summaryPill("NOPASSWD: \(nopasswd)", color: .red) }
+            if sudoersFiles > 0 { summaryPill("sudoers.d: \(sudoersFiles)", color: .orange) }
             Spacer()
         }
         .padding(.horizontal)
@@ -396,51 +396,13 @@ struct PermissionsView: View {
 
     private var usersTable: some View {
         Table(viewModel.userEntries) {
-            TableColumn("") { entry in
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(entry.risk.color)
-                    .font(.caption2)
-            }
-            .width(25)
-
-            TableColumn("Username") { entry in
-                Text(entry.username)
-                    .font(.system(.body, design: .monospaced))
-            }
-            .width(min: 100, ideal: 130)
-
-            TableColumn("Full Name") { entry in
-                Text(entry.fullName)
-            }
-            .width(min: 120, ideal: 180)
-
-            TableColumn("UID") { entry in
-                Text("\(entry.uid)")
-                    .font(.system(.caption, design: .monospaced))
-            }
-            .width(50)
-
-            TableColumn("Admin") { entry in
-                if entry.isAdmin {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.orange)
-                }
-            }
-            .width(50)
-
-            TableColumn("Shell") { entry in
-                Text(entry.shell)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
-            }
-            .width(min: 100, ideal: 150)
-
-            TableColumn("Risk") { entry in
-                Text(entry.riskReason)
-                    .font(.caption)
-                    .foregroundStyle(entry.risk.color)
-            }
-            .width(min: 150, ideal: 200)
+            TableColumn("") { e in Image(systemName: "circle.fill").foregroundStyle(e.risk.color).font(.caption2) }.width(25)
+            TableColumn("Username") { e in Text(e.username).font(.system(.body, design: .monospaced)) }.width(min: 100, ideal: 130)
+            TableColumn("Full Name") { e in Text(e.fullName) }.width(min: 120, ideal: 180)
+            TableColumn("UID") { e in Text("\(e.uid)").font(.system(.caption, design: .monospaced)) }.width(50)
+            TableColumn("Admin") { e in if e.isAdmin { Image(systemName: "checkmark.circle.fill").foregroundStyle(.orange) } }.width(50)
+            TableColumn("Shell") { e in Text(e.shell).font(.system(.caption, design: .monospaced)).lineLimit(1) }.width(min: 100, ideal: 150)
+            TableColumn("Risk") { e in Text(e.riskReason).font(.caption).foregroundStyle(e.risk.color) }.width(min: 150, ideal: 200)
         }
     }
 
@@ -449,81 +411,73 @@ struct PermissionsView: View {
     private var groupsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Image(systemName: "person.3")
-                    .foregroundStyle(.blue)
-                Text("Security-Relevant Groups")
-                    .font(.headline)
+                Image(systemName: "person.3").foregroundStyle(.blue)
+                Text("Security-Relevant Groups").font(.headline)
                 Spacer()
             }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
-
+            .padding(.horizontal).padding(.vertical, 6)
             Divider()
-
             if viewModel.groupEntries.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("No group data yet.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            } else {
-                groupsTable
-            }
+                VStack { Spacer(); Text("No group data yet.").foregroundStyle(.secondary); Spacer() }
+                    .frame(maxWidth: .infinity)
+            } else { groupsTable }
         }
     }
 
     private var groupsTable: some View {
         Table(viewModel.groupEntries) {
+            TableColumn("") { e in Image(systemName: "circle.fill").foregroundStyle(e.risk.color).font(.caption2) }.width(25)
+            TableColumn("Group") { e in Text(e.name).font(.system(.body, design: .monospaced)) }.width(min: 130, ideal: 170)
+            TableColumn("GID") { e in Text("\(e.gid)").font(.system(.caption, design: .monospaced)) }.width(45)
+            TableColumn("Members") { e in
+                if e.members.isEmpty { Text("(none)").font(.caption).foregroundStyle(.secondary) }
+                else { Text(e.members.joined(separator: ", ")).font(.system(.caption, design: .monospaced)).lineLimit(2) }
+            }.width(min: 180, ideal: 280)
+            TableColumn("Risk") { e in Text(e.riskReason).font(.caption).foregroundStyle(e.risk.color) }.width(min: 150, ideal: 250)
+            TableColumn("Action") { e in
+                if !e.actionHint.isEmpty && e.risk != .safe { Text(e.actionHint).font(.caption).foregroundStyle(.blue).lineLimit(2) }
+            }.width(min: 200, ideal: 300)
+        }
+    }
+
+    // MARK: - Sudo Section
+
+    private var sudoSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "terminal").foregroundStyle(.red)
+                Text("Sudo Rules").font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal).padding(.vertical, 6)
+            Divider()
+            sudoTable
+        }
+    }
+
+    private var sudoTable: some View {
+        Table(viewModel.sudoEntries) {
+            TableColumn("") { e in Image(systemName: "circle.fill").foregroundStyle(e.risk.color).font(.caption2) }.width(25)
+            TableColumn("Rule") { e in Text(e.rule).font(.system(.caption, design: .monospaced)).lineLimit(2) }.width(min: 250, ideal: 400)
+            TableColumn("Source") { e in Text(e.source).font(.caption).foregroundStyle(.secondary) }.width(min: 100, ideal: 130)
+            TableColumn("NOPASSWD") { e in if e.hasNOPASSWD { Text("YES").font(.caption.bold()).foregroundStyle(.red) } }.width(80)
+            TableColumn("Risk") { e in Text(e.riskReason).font(.caption).foregroundStyle(e.risk.color) }.width(min: 150, ideal: 250)
             TableColumn("") { entry in
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(entry.risk.color)
-                    .font(.caption2)
-            }
-            .width(25)
-
-            TableColumn("Group") { entry in
-                Text(entry.name)
-                    .font(.system(.body, design: .monospaced))
-            }
-            .width(min: 130, ideal: 170)
-
-            TableColumn("GID") { entry in
-                Text("\(entry.gid)")
-                    .font(.system(.caption, design: .monospaced))
-            }
-            .width(45)
-
-            TableColumn("Members") { entry in
-                if entry.members.isEmpty {
-                    Text("(none)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(entry.members.joined(separator: ", "))
-                        .font(.system(.caption, design: .monospaced))
-                        .lineLimit(2)
+                let _ = approvalVersion
+                if entry.needsReview {
+                    let approved = ApprovalManager.isApproved(.sudoConfig, id: entry.approvalID)
+                    HStack(spacing: 4) {
+                        Button(approved ? "Revoke" : "Approve") {
+                            if approved { ApprovalManager.revoke(.sudoConfig, id: entry.approvalID) }
+                            else { ApprovalManager.approve(.sudoConfig, id: entry.approvalID) }
+                            approvalVersion += 1
+                        }
+                        .font(.caption).buttonStyle(.bordered).controlSize(.mini).tint(approved ? .red : .green)
+                        Button("Ask Claude") { investigateSudo(entry) }
+                            .font(.caption).buttonStyle(.bordered).controlSize(.mini)
+                    }
                 }
-            }
-            .width(min: 180, ideal: 280)
-
-            TableColumn("Risk") { entry in
-                Text(entry.riskReason)
-                    .font(.caption)
-                    .foregroundStyle(entry.risk.color)
-            }
-            .width(min: 150, ideal: 250)
-
-            TableColumn("Action") { entry in
-                if !entry.actionHint.isEmpty && entry.risk != .safe {
-                    Text(entry.actionHint)
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                        .lineLimit(2)
-                }
-            }
-            .width(min: 200, ideal: 300)
+            }.width(160)
         }
     }
 
@@ -535,11 +489,12 @@ struct PermissionsView: View {
 
         PERMISSION DETAILS:
         - Service: \(entry.serviceFriendly) (\(entry.service))
-        - App: \(entry.client)
+        - App: \(entry.appName) (\(entry.client))
         - Authorization: \(entry.authLabel)
         - Is Apple app: \(entry.isAppleApp ? "Yes" : "No")
+        - Signed: \(entry.isSigned == true ? "Yes" : entry.isSigned == false ? "NO" : "Unknown")
         - Risk level: \(entry.risk.label)
-        - Risk reason: \(entry.riskReason)
+        - Permission impact: \(entry.permissionExplanation)
 
         INVESTIGATION STEPS:
         1. What is this app (\(entry.client))? Is it legitimate software?

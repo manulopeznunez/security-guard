@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @Observable
@@ -19,6 +20,26 @@ final class PermissionsViewModel {
     var isScanning = false
     var progress = ""
 
+    var tccAppGroups: [TCCAppGroup] {
+        let grouped = Dictionary(grouping: tccEntries, by: \.client)
+        return grouped.map { (client, entries) in
+            let first = entries[0]
+            return TCCAppGroup(
+                id: client,
+                client: client,
+                appName: first.appName,
+                appIconData: first.appIconData,
+                permissions: entries.sorted { $0.risk > $1.risk }
+            )
+        }
+        .sorted {
+            if $0.aggregateRisk != $1.aggregateRisk {
+                return $0.aggregateRisk > $1.aggregateRisk
+            }
+            return $0.permissionCount > $1.permissionCount
+        }
+    }
+
     // MARK: - Scan All
 
     func scanAll() async {
@@ -28,6 +49,63 @@ final class PermissionsViewModel {
         await scanUsers()
         isScanning = false
         progress = ""
+
+        saveCachedResult()
+        ScanDateTracker.record(.permissions)
+
+        let tccFlagged = tccEntries.filter(\.needsReview).count
+        let sudoFlagged = sudoEntries.filter(\.needsReview).count
+        let userFlagged = userEntries.filter(\.needsReview).count
+        let totalItems = tccEntries.count + sudoEntries.count + userEntries.count
+        let totalFlagged = tccFlagged + sudoFlagged + userFlagged
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "permissions", total: totalItems, flagged: totalFlagged,
+            summary: "\(tccEntries.count) TCC, \(sudoEntries.count) sudo, \(userEntries.count) users — \(totalFlagged) flagged"
+        )
+    }
+
+    func loadCached() {
+        guard let cached = Self.loadCachedResult() else { return }
+        tccEntries = cached.tccEntries
+        fdaAvailable = cached.fdaAvailable
+        sudoEntries = cached.sudoEntries
+        userEntries = cached.userEntries
+        groupEntries = cached.groupEntries
+        adminUsers = cached.adminUsers
+        guestEnabled = cached.guestEnabled
+    }
+
+    // MARK: - JSON Cache
+
+    struct PermissionsCacheResult: Codable {
+        let tccEntries: [TCCEntry]
+        let fdaAvailable: Bool
+        let sudoEntries: [SudoEntry]
+        let userEntries: [UserAccountEntry]
+        let groupEntries: [GroupEntry]
+        let adminUsers: [String]
+        let guestEnabled: Bool
+    }
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("permissions-cache.json")
+    }
+
+    private func saveCachedResult() {
+        let result = PermissionsCacheResult(
+            tccEntries: tccEntries, fdaAvailable: fdaAvailable,
+            sudoEntries: sudoEntries, userEntries: userEntries,
+            groupEntries: groupEntries, adminUsers: adminUsers, guestEnabled: guestEnabled
+        )
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: Self.cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> PermissionsCacheResult? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode(PermissionsCacheResult.self, from: data)
     }
 
     // MARK: - TCC Scan
@@ -127,10 +205,71 @@ final class PermissionsViewModel {
             }
         }
 
-        // Check signatures for non-Apple clients
+        // Check signatures and resolve app names/icons for non-Apple clients
         var signatureCache: [String: Bool] = [:]
+        var appNameCache: [String: String] = [:]
+        var appIconCache: [String: Data?] = [:]
+
         for client in clientsToCheck {
             signatureCache[client] = checkClientSignature(client)
+        }
+
+        // Resolve app names and icons for all unique clients
+        let uniqueClients = Set(rawEntries.map(\.client))
+        for client in uniqueClients where appNameCache[client] == nil {
+            let isApple = client.hasPrefix("com.apple.")
+            let clientType = rawEntries.first(where: { $0.client == client })?.clientType ?? 0
+
+            if clientType == 1 {
+                // Path-based client — walk up to find .app bundle
+                let url = URL(fileURLWithPath: client)
+                var current = url
+                var resolved = false
+                while current.path != "/" {
+                    if current.pathExtension == "app" {
+                        if let bundle = Bundle(url: current) {
+                            let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                                ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+                                ?? current.deletingPathExtension().lastPathComponent
+                            appNameCache[client] = name
+                            appIconCache[client] = pngData(from: NSWorkspace.shared.icon(forFile: current.path))
+                            resolved = true
+                        }
+                        break
+                    }
+                    current = current.deletingLastPathComponent()
+                }
+                if !resolved {
+                    appNameCache[client] = url.lastPathComponent
+                    appIconCache[client] = nil
+                }
+            } else if isApple {
+                // Apple app — resolve name but skip icon (less important)
+                if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: client) {
+                    let bundle = Bundle(url: appURL)
+                    appNameCache[client] = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                        ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                        ?? appURL.deletingPathExtension().lastPathComponent
+                    appIconCache[client] = pngData(from: NSWorkspace.shared.icon(forFile: appURL.path))
+                } else {
+                    let lastPart = client.components(separatedBy: ".").last ?? client
+                    appNameCache[client] = lastPart
+                    appIconCache[client] = nil
+                }
+            } else {
+                // Third-party bundle ID
+                if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: client) {
+                    let bundle = Bundle(url: appURL)
+                    appNameCache[client] = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                        ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                        ?? appURL.deletingPathExtension().lastPathComponent
+                    appIconCache[client] = pngData(from: NSWorkspace.shared.icon(forFile: appURL.path))
+                } else {
+                    let lastPart = client.components(separatedBy: ".").last ?? client
+                    appNameCache[client] = lastPart
+                    appIconCache[client] = nil
+                }
+            }
         }
 
         var entries: [TCCEntry] = []
@@ -152,6 +291,8 @@ final class PermissionsViewModel {
                 lastModified: raw.lastModified,
                 isAppleApp: raw.isApple,
                 isSigned: isSigned,
+                appName: appNameCache[raw.client] ?? raw.client,
+                appIconData: appIconCache[raw.client] ?? nil,
                 risk: risk,
                 riskReason: reason
             ))
@@ -262,6 +403,21 @@ final class PermissionsViewModel {
         return result.exitCode == 0
     }
 
+    // MARK: - Icon Helper
+
+    nonisolated private static func pngData(from image: NSImage) -> Data? {
+        let size = NSSize(width: 32, height: 32)
+        let resized = NSImage(size: size)
+        resized.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: size),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy, fraction: 1.0)
+        resized.unlockFocus()
+        guard let tiff = resized.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
     // MARK: - Static Sudo Scan
 
     nonisolated static func performSudoScan() async -> [SudoEntry] {
@@ -293,34 +449,6 @@ final class PermissionsViewModel {
                     source: "sudoers.d/\(name)",
                     risk: .warning,
                     riskReason: "Extra sudoers.d file detected"
-                ))
-            }
-        }
-
-        // Check if current user is in admin group
-        let adminResult = await Task.detached {
-            ShellExecutor.run(
-                "/usr/bin/dscl", arguments: [".", "-read", "/Groups/admin", "GroupMembership"],
-                timeout: .local
-            )
-        }.value
-
-        if adminResult.exitCode == 0 {
-            let currentUser = NSUserName()
-            let members =
-                adminResult.output
-                .components(separatedBy: "GroupMembership:").last?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let adminSet = Set(members.split(separator: " ").map(String.init))
-            if adminSet.contains(currentUser) {
-                entries.append(SudoEntry(
-                    rule: "\(currentUser) is in admin group",
-                    user: currentUser,
-                    hasNOPASSWD: false,
-                    commands: "ALL (with password)",
-                    source: "admin group",
-                    risk: .warning,
-                    riskReason: "Admin users can sudo with password"
                 ))
             }
         }

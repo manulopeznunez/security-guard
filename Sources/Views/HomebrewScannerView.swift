@@ -12,6 +12,7 @@ struct HomebrewScannerView: View {
     @State private var showBulkAnalysis = false
     @State private var bulkAnalyzing = false
     @State private var itemToQuarantine: String?
+    @State private var expandedEntries: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -21,6 +22,7 @@ struct HomebrewScannerView: View {
                     .foregroundStyle(.orange)
                 Text("Homebrew Health")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .homebrew)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()
@@ -253,6 +255,7 @@ struct HomebrewScannerView: View {
         } message: {
             Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
+        .task { viewModel.loadCached() }
     }
 
     // MARK: - Summary Bar
@@ -446,22 +449,27 @@ struct HomebrewScannerView: View {
                         }
                     } else {
                         ScrollView {
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 ForEach(detailCVEs) { cve in
-                                    HStack(spacing: 6) {
-                                        Text(cve.severity.label)
-                                            .font(.system(size: 9, weight: .bold))
-                                            .padding(.horizontal, 4)
-                                            .padding(.vertical, 1)
-                                            .background(cveSeverityColor(cve.severity).opacity(0.2))
-                                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                                            .foregroundStyle(cveSeverityColor(cve.severity))
-                                        Text(cve.displayID)
-                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                        Text(cve.summary)
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(cve.severity.label)
+                                                .font(.system(size: 9, weight: .bold))
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(cveSeverityColor(cve.severity).opacity(0.2))
+                                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                                .foregroundStyle(cveSeverityColor(cve.severity))
+                                            Text(cve.displayID)
+                                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        }
+                                        if !cve.summary.isEmpty {
+                                            Text(cve.summary)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(3)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
                                     }
                                 }
 
@@ -473,7 +481,7 @@ struct HomebrewScannerView: View {
                                 }
                             }
                         }
-                        .frame(maxHeight: 120)
+                        .frame(maxHeight: 160)
                     }
                 }
             }
@@ -750,7 +758,28 @@ struct HomebrewScannerView: View {
                     }
 
                     // Expandable consequences
-                    DisclosureGroup {
+                    let isExpanded = expandedEntries.contains(entry.id)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            if isExpanded {
+                                expandedEntries.remove(entry.id)
+                            } else {
+                                expandedEntries.insert(entry.id)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("What happens if...")
+                                .font(.system(size: 11))
+                        }
+                        .foregroundStyle(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 14)
+
+                    if isExpanded {
                         VStack(alignment: .leading, spacing: 8) {
                             // CVE list
                             if !entry.vulnerabilities.isEmpty {
@@ -763,20 +792,25 @@ struct HomebrewScannerView: View {
                                     .foregroundStyle(.red)
 
                                     ForEach(entry.vulnerabilities) { cve in
-                                        HStack(spacing: 6) {
-                                            Text(cve.severity.label)
-                                                .font(.system(size: 9, weight: .bold))
-                                                .padding(.horizontal, 4)
-                                                .padding(.vertical, 1)
-                                                .background(cveSeverityColor(cve.severity).opacity(0.2))
-                                                .clipShape(RoundedRectangle(cornerRadius: 3))
-                                                .foregroundStyle(cveSeverityColor(cve.severity))
-                                            Text(cve.displayID)
-                                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                            Text(cve.summary)
-                                                .font(.system(size: 10))
-                                                .foregroundStyle(.secondary)
-                                                .lineLimit(1)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack(spacing: 6) {
+                                                Text(cve.severity.label)
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 1)
+                                                    .background(cveSeverityColor(cve.severity).opacity(0.2))
+                                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                                                    .foregroundStyle(cveSeverityColor(cve.severity))
+                                                Text(cve.displayID)
+                                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                            }
+                                            if !cve.summary.isEmpty {
+                                                Text(cve.summary)
+                                                    .font(.system(size: 10))
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(3)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
                                         }
                                     }
 
@@ -810,13 +844,10 @@ struct HomebrewScannerView: View {
                             consequenceRow(icon: "trash", label: "If you delete", text: entry.ifDelete, color: entry.dependents.isEmpty ? .blue : .red)
                         }
                         .padding(.top, 4)
-                    } label: {
-                        Text("What happens if...")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.blue)
+                        .padding(.leading, 14)
+                        .font(.caption)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    .padding(.leading, 14)
-                    .font(.caption)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 4)

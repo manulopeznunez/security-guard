@@ -24,11 +24,44 @@ final class HomebrewScannerViewModel {
 
         let flagged = results.packages.filter(\.needsReview).map(\.approvalID)
         ApprovalManager.recordScanResults(.homebrew, flaggedIDs: flagged)
+
+        Self.saveCachedResult(results)
+        ScanDateTracker.record(.homebrew)
+        let flaggedCount = flagged.count
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "homebrew", total: results.packages.count, flagged: flaggedCount,
+            summary: "\(results.packages.count) packages, \(flaggedCount) need review"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadCachedResult() {
+            packages = cached.packages
+            brewInstalled = cached.brewFound
+        }
+    }
+
+    // MARK: - JSON Cache
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("homebrew-cache.json")
+    }
+
+    nonisolated private static func saveCachedResult(_ result: ScanResult) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> ScanResult? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode(ScanResult.self, from: data)
     }
 
     // MARK: - Static scan result
 
-    struct ScanResult: Sendable {
+    struct ScanResult: Sendable, Codable {
         let brewFound: Bool
         let packages: [HomebrewPackage]
     }
@@ -340,10 +373,22 @@ final class HomebrewScannerViewModel {
 
     func updateAll() async {
         guard let brew = SecurityStatusViewModel.brewPath() else { return }
-        progress = "Updating all packages..."
-        _ = await Task.detached {
-            ShellExecutor.run(brew, arguments: ["upgrade"], timeout: .scan)
+        isScanning = true
+        progress = "Updating all packages (this may take a while)..."
+        let result = await Task.detached {
+            ShellExecutor.run(brew, arguments: ["upgrade"], timeout: .none)
         }.value
+        isScanning = false
+
+        if result.exitCode != 0 && !result.timedOut {
+            let alert = NSAlert()
+            alert.messageText = "Update finished with errors"
+            alert.informativeText = result.error.isEmpty ? result.output : result.error
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+
         await scan()
     }
 
@@ -404,10 +449,21 @@ final class HomebrewScannerViewModel {
             args = ["uninstall", pkg.name]
         }
 
+        isScanning = true
         progress = "Uninstalling \(pkg.name)..."
-        _ = await Task.detached {
+        let result = await Task.detached {
             ShellExecutor.run(brew, arguments: args, timeout: .install)
         }.value
+        isScanning = false
+
+        if result.exitCode != 0 {
+            let alert = NSAlert()
+            alert.messageText = "Failed to uninstall \(pkg.name)"
+            alert.informativeText = result.error.isEmpty ? result.output : result.error
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
 
         await scan()
     }
@@ -438,10 +494,21 @@ final class HomebrewScannerViewModel {
             args = ["upgrade", pkg.name]
         }
 
+        isScanning = true
         progress = "Updating \(pkg.name)..."
-        _ = await Task.detached {
-            ShellExecutor.run(brew, arguments: args, timeout: .install)
+        let result = await Task.detached {
+            ShellExecutor.run(brew, arguments: args, timeout: .none)
         }.value
+        isScanning = false
+
+        if result.exitCode != 0 && !result.timedOut {
+            let alert = NSAlert()
+            alert.messageText = "Failed to update \(pkg.name)"
+            alert.informativeText = result.error.isEmpty ? result.output : result.error
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
 
         await scan()
     }

@@ -18,6 +18,35 @@ final class ChromeExtensionViewModel {
         // Cache flagged items for Security Status
         let flagged = results.filter { $0.risk == .high }.map(\.extensionId)
         ApprovalManager.recordScanResults(.chromeExtension, flaggedIDs: flagged)
+
+        Self.saveCachedResult(results)
+        ScanDateTracker.record(.chromeExtensions)
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "chromeExtensions", total: results.count, flagged: flagged.count,
+            summary: "\(results.count) extensions, \(flagged.count) high risk"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadCachedResult() { extensions = cached }
+    }
+
+    // MARK: - JSON Cache
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("chrome-extensions-cache.json")
+    }
+
+    nonisolated private static func saveCachedResult(_ result: [ChromeExtensionEntry]) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> [ChromeExtensionEntry]? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode([ChromeExtensionEntry].self, from: data)
     }
 
     nonisolated static func performScan() -> [ChromeExtensionEntry] {

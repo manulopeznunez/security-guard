@@ -30,6 +30,11 @@ final class KnockKnockViewModel {
 
         let flaggedKK = scanResult.flaggedItems.map(\.path)
         ApprovalManager.recordScanResults(.knockknock, flaggedIDs: flaggedKK)
+        ScanDateTracker.record(.knockknock)
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "knockknock", total: scanResult.totalItems, flagged: flaggedKK.count,
+            summary: "\(scanResult.totalItems) items, \(scanResult.unsignedCount) unsigned, \(scanResult.vtFlaggedCount) VT flagged"
+        )
     }
 
     func loadCached() {

@@ -20,6 +20,36 @@ final class ProcessScannerViewModel {
         // Cache flagged items for Security Status
         let flagged = results.filter { $0.signatureValid == false }.map(\.path)
         ApprovalManager.recordScanResults(.process, flaggedIDs: flagged)
+
+        Self.saveCachedResult(results)
+        ScanDateTracker.record(.processes)
+        let flaggedCount = flagged.count
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "processes", total: results.count, flagged: flaggedCount,
+            summary: "\(results.count) processes, \(flaggedCount) unsigned"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadCachedResult() { processes = cached }
+    }
+
+    // MARK: - JSON Cache
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("process-cache.json")
+    }
+
+    nonisolated private static func saveCachedResult(_ result: [ProcessEntry]) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> [ProcessEntry]? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode([ProcessEntry].self, from: data)
     }
 
     nonisolated static func performScan(onProgress: @Sendable @escaping (String) -> Void) async -> [ProcessEntry] {

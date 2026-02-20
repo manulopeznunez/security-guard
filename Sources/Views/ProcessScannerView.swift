@@ -12,6 +12,7 @@ struct ProcessScannerView: View {
                     .foregroundStyle(.blue)
                 Text("Process Scanner")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .processes)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()
@@ -140,11 +141,9 @@ struct ProcessScannerView: View {
                     .width(50)
 
                     TableColumn("Path") { p in
-                        Text(p.path)
-                            .font(.caption)
+                        ClickablePath(path: p.path, font: .caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .help(p.path)
                     }
                     .width(min: 150)
 
@@ -255,5 +254,6 @@ struct ProcessScannerView: View {
         } message: {
             Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
+        .task { viewModel.loadCached() }
     }
 }

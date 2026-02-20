@@ -12,7 +12,10 @@ enum TabSection: String, CaseIterable, Identifiable {
     case history = "History"
     case attackSurface = "Surface"
     case configGuard = "Config"
+    case devDeps = "DevDeps"
     case permissions = "Permissions"
+    case exposure = "Exposure"
+    case breaches = "Breaches"
 
     var id: String { rawValue }
 
@@ -29,7 +32,10 @@ enum TabSection: String, CaseIterable, Identifiable {
         case .history: "clock.arrow.2.circlepath"
         case .attackSurface: "network.badge.shield.half.filled"
         case .configGuard: "doc.text.magnifyingglass"
+        case .devDeps: "ladybug"
         case .permissions: "lock.shield"
+        case .exposure: "antenna.radiowaves.left.and.right"
+        case .breaches: "exclamationmark.lock"
         }
     }
 
@@ -46,7 +52,39 @@ enum TabSection: String, CaseIterable, Identifiable {
         case .history: "Hist"
         case .attackSurface: "Surf"
         case .configGuard: "Cfg"
+        case .devDeps: "Deps"
         case .permissions: "Perms"
+        case .exposure: "Exp"
+        case .breaches: "Leak"
+        }
+    }
+
+    /// ApprovalManager categories tracked by this tab.
+    var approvalCategories: [ApprovalManager.Category] {
+        switch self {
+        case .securityStatus: []
+        case .processes: [.process]
+        case .persistence: [.persistence]
+        case .knockKnock: [.knockknock]
+        case .homebrew: [.homebrew]
+        case .appSignatures: [.appSignature]
+        case .extensions: [.chromeExtension, .browserExtension]
+        case .network: [.networkMonitor]
+        case .history: []
+        case .attackSurface: [.attackSurface]
+        case .configGuard: [.configGuard]
+        case .devDeps: [.devDeps]
+        case .permissions: [.tccPermission, .sudoConfig, .usersGroups]
+        case .exposure: [.exposure]
+        case .breaches: [.breachCheck]
+        }
+    }
+
+    /// True when any mapped category has pending or quarantined items.
+    var hasAlert: Bool {
+        approvalCategories.contains { cat in
+            ApprovalManager.pendingCount(for: cat) > 0
+                || ApprovalManager.quarantinedCount(for: cat) > 0
         }
     }
 }
@@ -57,14 +95,17 @@ private struct TabGroup {
 }
 
 private let tabGroups: [TabGroup] = [
-    TabGroup(label: "System", tabs: [.processes, .persistence, .knockKnock, .homebrew, .configGuard]),
+    TabGroup(label: "System", tabs: [.processes, .persistence, .knockKnock, .homebrew, .configGuard, .devDeps]),
     TabGroup(label: "Apps", tabs: [.appSignatures, .extensions]),
     TabGroup(label: "Network", tabs: [.network, .history, .attackSurface]),
-    TabGroup(label: "Access", tabs: [.permissions]),
+    TabGroup(label: "Access", tabs: [.permissions, .exposure]),
+    TabGroup(label: "Identity", tabs: [.breaches]),
 ]
 
 struct ContentView: View {
     @State private var selectedTab: TabSection = .securityStatus
+    /// Incremented when approval state changes so tab badges re-evaluate.
+    @State private var badgeRevision = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -77,6 +118,9 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .task {
             BackgroundMonitor.shared.start()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ApprovalManager.stateDidChangeNotification)) { _ in
+            badgeRevision += 1
         }
     }
 
@@ -169,7 +213,11 @@ struct ContentView: View {
     }
 
     private func tabButton(_ tab: TabSection, density: TabDensity) -> some View {
-        Button {
+        // badgeRevision dependency ensures SwiftUI re-evaluates hasAlert after state changes.
+        let _ = badgeRevision
+        let showAlert = tab.hasAlert
+
+        return Button {
             selectedTab = tab
         } label: {
             HStack(spacing: density == .iconOnly ? 0 : 3) {
@@ -193,6 +241,14 @@ struct ContentView: View {
                     .fill(selectedTab == tab ? Color.accentColor.opacity(0.15) : Color.clear)
             )
             .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
+            .overlay(alignment: .topTrailing) {
+                if showAlert {
+                    Circle()
+                        .fill(Color.fpeDestructive)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 2, y: -2)
+                }
+            }
         }
         .buttonStyle(.plain)
         .help(tab.rawValue)
@@ -201,18 +257,21 @@ struct ContentView: View {
     @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
-        case .securityStatus: StatusDashboardView()
+        case .securityStatus: StatusDashboardView(selectedTab: $selectedTab)
         case .processes: ProcessScannerView()
         case .persistence: PersistenceScannerView()
         case .knockKnock: KnockKnockView()
         case .homebrew: HomebrewScannerView()
         case .appSignatures: AppSignatureView()
-        case .extensions: ChromeExtensionView()
+        case .extensions: BrowserExtensionView()
         case .network: NetworkMonitorView()
         case .history: NetworkHistoryView()
         case .attackSurface: AttackSurfaceView()
         case .configGuard: ConfigGuardView()
+        case .devDeps: DevDepsView()
         case .permissions: PermissionsView()
+        case .exposure: ExposureView()
+        case .breaches: BreachCheckView()
         }
     }
 }

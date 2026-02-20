@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MacSecurityGuard
 
@@ -86,6 +87,7 @@ struct PermissionsTests {
             client: "us.zoom.xos",
             clientType: 0, authValue: 2, authReason: 0,
             lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "Zoom", appIconData: nil,
             risk: .warning, riskReason: "test"
         )
         #expect(entry.approvalID == "kTCCServiceCamera:us.zoom.xos")
@@ -96,6 +98,7 @@ struct PermissionsTests {
             service: "x", serviceFriendly: "x", client: "x",
             clientType: 0, authValue: 2, authReason: 0,
             lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "x", appIconData: nil,
             risk: .dangerous, riskReason: ""
         )
         #expect(dangerous.needsReview)
@@ -104,6 +107,7 @@ struct PermissionsTests {
             service: "x", serviceFriendly: "x", client: "x",
             clientType: 0, authValue: 2, authReason: 0,
             lastModified: nil, isAppleApp: true, isSigned: nil,
+            appName: "x", appIconData: nil,
             risk: .safe, riskReason: ""
         )
         #expect(!safe.needsReview)
@@ -114,6 +118,7 @@ struct PermissionsTests {
             service: "x", serviceFriendly: "x", client: "x",
             clientType: 0, authValue: 0, authReason: 0,
             lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "x", appIconData: nil,
             risk: .safe, riskReason: ""
         )
         #expect(denied.authLabel == "Denied")
@@ -122,6 +127,7 @@ struct PermissionsTests {
             service: "x", serviceFriendly: "x", client: "x",
             clientType: 0, authValue: 2, authReason: 0,
             lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "x", appIconData: nil,
             risk: .safe, riskReason: ""
         )
         #expect(allowed.authLabel == "Allowed")
@@ -130,6 +136,7 @@ struct PermissionsTests {
             service: "x", serviceFriendly: "x", client: "x",
             clientType: 0, authValue: 3, authReason: 0,
             lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "x", appIconData: nil,
             risk: .safe, riskReason: ""
         )
         #expect(limited.authLabel == "Limited")
@@ -147,6 +154,182 @@ struct PermissionsTests {
     @Test func unknownServiceFallback() {
         let name = PermissionsViewModel.friendlyServiceName("kTCCServiceSomethingNew")
         #expect(name == "SomethingNew")
+    }
+
+    // MARK: - TCC Permission Explanation
+
+    @Test func permissionExplanationForFDA() {
+        let entry = TCCEntry(
+            service: "kTCCServiceSystemPolicyAllFiles",
+            serviceFriendly: "Full Disk Access",
+            client: "com.example.app",
+            clientType: 0, authValue: 2, authReason: 0,
+            lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "Example", appIconData: nil,
+            risk: .dangerous, riskReason: ""
+        )
+        #expect(entry.permissionExplanation.contains("ALL files"))
+    }
+
+    @Test func permissionExplanationFallback() {
+        let entry = TCCEntry(
+            service: "kTCCServiceSomethingNew",
+            serviceFriendly: "Something New",
+            client: "com.example.app",
+            clientType: 0, authValue: 2, authReason: 0,
+            lastModified: nil, isAppleApp: false, isSigned: nil,
+            appName: "Example", appIconData: nil,
+            risk: .safe, riskReason: ""
+        )
+        #expect(entry.permissionExplanation == "Has Something New permission")
+    }
+
+    // MARK: - TCC Recently Granted
+
+    @Test func recentlyGrantedWithin7Days() {
+        let recent = TCCEntry(
+            service: "kTCCServiceCamera",
+            serviceFriendly: "Camera",
+            client: "com.example.app",
+            clientType: 0, authValue: 2, authReason: 0,
+            lastModified: Date().addingTimeInterval(-3 * 24 * 3600),
+            isAppleApp: false, isSigned: nil,
+            appName: "Example", appIconData: nil,
+            risk: .warning, riskReason: ""
+        )
+        #expect(recent.isRecentlyGranted)
+
+        let old = TCCEntry(
+            service: "kTCCServiceCamera",
+            serviceFriendly: "Camera",
+            client: "com.example.app",
+            clientType: 0, authValue: 2, authReason: 0,
+            lastModified: Date().addingTimeInterval(-30 * 24 * 3600),
+            isAppleApp: false, isSigned: nil,
+            appName: "Example", appIconData: nil,
+            risk: .warning, riskReason: ""
+        )
+        #expect(!old.isRecentlyGranted)
+
+        let noDate = TCCEntry(
+            service: "kTCCServiceCamera",
+            serviceFriendly: "Camera",
+            client: "com.example.app",
+            clientType: 0, authValue: 2, authReason: 0,
+            lastModified: nil,
+            isAppleApp: false, isSigned: nil,
+            appName: "Example", appIconData: nil,
+            risk: .warning, riskReason: ""
+        )
+        #expect(!noDate.isRecentlyGranted)
+    }
+
+    // MARK: - TCC App Group
+
+    @Test func appGroupAggregateRisk() {
+        let entries = [
+            TCCEntry(
+                service: "kTCCServiceCamera", serviceFriendly: "Camera",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: nil, isAppleApp: false, isSigned: true,
+                appName: "Example", appIconData: nil,
+                risk: .warning, riskReason: ""
+            ),
+            TCCEntry(
+                service: "kTCCServiceSystemPolicyAllFiles", serviceFriendly: "Full Disk Access",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: nil, isAppleApp: false, isSigned: true,
+                appName: "Example", appIconData: nil,
+                risk: .dangerous, riskReason: ""
+            ),
+        ]
+        let group = TCCAppGroup(
+            id: "com.example.app", client: "com.example.app",
+            appName: "Example", appIconData: nil,
+            permissions: entries
+        )
+        #expect(group.aggregateRisk == .dangerous)
+        #expect(group.permissionCount == 2)
+    }
+
+    @Test func appGroupHighExposure() {
+        // Any dangerous permission → high exposure
+        let dangerousEntries = [
+            TCCEntry(
+                service: "kTCCServiceSystemPolicyAllFiles", serviceFriendly: "FDA",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: nil, isAppleApp: false, isSigned: nil,
+                appName: "Example", appIconData: nil,
+                risk: .dangerous, riskReason: ""
+            ),
+        ]
+        let dangerousGroup = TCCAppGroup(
+            id: "com.example.app", client: "com.example.app",
+            appName: "Example", appIconData: nil,
+            permissions: dangerousEntries
+        )
+        #expect(dangerousGroup.hasHighExposure)
+
+        // 3+ non-safe permissions → high exposure
+        let manyWarnings = (0..<3).map { i in
+            TCCEntry(
+                service: "kTCCService\(i)", serviceFriendly: "Service \(i)",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: nil, isAppleApp: false, isSigned: nil,
+                appName: "Example", appIconData: nil,
+                risk: .warning, riskReason: ""
+            )
+        }
+        let warningGroup = TCCAppGroup(
+            id: "com.example.app", client: "com.example.app",
+            appName: "Example", appIconData: nil,
+            permissions: manyWarnings
+        )
+        #expect(warningGroup.hasHighExposure)
+
+        // Single safe permission → not high exposure
+        let safeEntries = [
+            TCCEntry(
+                service: "kTCCServiceCalendar", serviceFriendly: "Calendar",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: nil, isAppleApp: false, isSigned: nil,
+                appName: "Example", appIconData: nil,
+                risk: .safe, riskReason: ""
+            ),
+        ]
+        let safeGroup = TCCAppGroup(
+            id: "com.example.app", client: "com.example.app",
+            appName: "Example", appIconData: nil,
+            permissions: safeEntries
+        )
+        #expect(!safeGroup.hasHighExposure)
+    }
+
+    @Test func appGroupRecentCount() {
+        let entries = [
+            TCCEntry(
+                service: "kTCCServiceCamera", serviceFriendly: "Camera",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: Date().addingTimeInterval(-2 * 24 * 3600),
+                isAppleApp: false, isSigned: nil,
+                appName: "Example", appIconData: nil,
+                risk: .warning, riskReason: ""
+            ),
+            TCCEntry(
+                service: "kTCCServiceMicrophone", serviceFriendly: "Microphone",
+                client: "com.example.app", clientType: 0, authValue: 2, authReason: 0,
+                lastModified: Date().addingTimeInterval(-30 * 24 * 3600),
+                isAppleApp: false, isSigned: nil,
+                appName: "Example", appIconData: nil,
+                risk: .warning, riskReason: ""
+            ),
+        ]
+        let group = TCCAppGroup(
+            id: "com.example.app", client: "com.example.app",
+            appName: "Example", appIconData: nil,
+            permissions: entries
+        )
+        #expect(group.recentCount == 1)
     }
 
     // MARK: - Sudo Model Properties

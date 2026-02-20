@@ -71,6 +71,7 @@ struct KnockKnockView: View {
                 .foregroundStyle(.purple)
             Text("KnockKnock Scanner")
                 .font(.title.bold())
+            ScanDateLabel(scanner: .knockknock)
             Spacer()
             if viewModel.isScanning {
                 ProgressView()
@@ -186,10 +187,8 @@ struct KnockKnockView: View {
                 .width(min: 120)
 
             TableColumn("Path") { item in
-                Text(item.path)
-                    .font(.caption)
+                ClickablePath(path: item.path, font: .caption)
                     .lineLimit(1)
-                    .help(item.path)
             }
             .width(min: 200)
 

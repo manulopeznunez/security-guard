@@ -66,4 +66,6 @@ struct SecurityItem: Identifiable, Sendable {
     let status: SecurityItemStatus
     let action: SecurityAction
     let category: SecurityCategory
+    /// Tab to navigate to when this card is clicked (nil = no navigation).
+    var targetTab: TabSection? = nil
 }

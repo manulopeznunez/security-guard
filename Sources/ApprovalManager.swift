@@ -5,6 +5,13 @@ import Foundation
 /// Three states: pending (default), approved (safe), quarantined (dangerous).
 /// Persisted in UserDefaults across sessions.
 enum ApprovalManager {
+    /// Posted whenever approval state changes (scan results, approve, quarantine, revoke).
+    /// UI observes this to refresh tab alert badges.
+    static let stateDidChangeNotification = Notification.Name("ApprovalManagerStateDidChange")
+
+    private static func notifyChange() {
+        NotificationCenter.default.post(name: stateDidChangeNotification, object: nil)
+    }
     enum Category: String {
         case process = "process"
         case persistence = "persistence"
@@ -18,6 +25,10 @@ enum ApprovalManager {
         case configGuard = "config"
         case sudoConfig = "sudo"
         case usersGroups = "users"
+        case browserExtension = "browserExt"
+        case exposure = "exposure"
+        case devDeps = "devdeps"
+        case breachCheck = "breach"
     }
 
     // MARK: - Approval storage
@@ -50,6 +61,7 @@ enum ApprovalManager {
         DatabaseManager.shared.insertApprovalEvent(
             category: category.rawValue, itemID: id, action: "approved"
         )
+        notifyChange()
     }
 
     static func revoke(_ category: Category, id: String) {
@@ -59,6 +71,7 @@ enum ApprovalManager {
         DatabaseManager.shared.insertApprovalEvent(
             category: category.rawValue, itemID: id, action: "revoked"
         )
+        notifyChange()
     }
 
     // MARK: - Quarantine storage
@@ -91,6 +104,7 @@ enum ApprovalManager {
         DatabaseManager.shared.insertApprovalEvent(
             category: category.rawValue, itemID: id, action: "quarantined"
         )
+        notifyChange()
     }
 
     static func unquarantine(_ category: Category, id: String) {
@@ -100,6 +114,7 @@ enum ApprovalManager {
         DatabaseManager.shared.insertApprovalEvent(
             category: category.rawValue, itemID: id, action: "unquarantined"
         )
+        notifyChange()
     }
 
     static func quarantinedCount(for category: Category) -> Int {
@@ -157,6 +172,7 @@ enum ApprovalManager {
         }
 
         pruneOrphanedEntries(category, currentIDs: Set(flaggedIDs))
+        notifyChange()
     }
 
     /// Remove approval and quarantine entries for a category whose IDs
@@ -193,6 +209,18 @@ enum ApprovalManager {
                 )
             }
         }
+    }
+
+    // MARK: - Approval Date Queries
+
+    /// Returns when an item was last approved or quarantined, with the action name.
+    static func lastActionDate(_ category: Category, id: String) -> (action: String, date: Date)? {
+        DatabaseManager.shared.lastActionDate(category: category.rawValue, itemID: id)
+    }
+
+    /// Items approved more than N days ago — candidates for rotation/re-review.
+    static func staleApprovals(for category: Category, days: Int = 90) -> [ApprovalEvent] {
+        DatabaseManager.shared.staleApprovals(category: category.rawValue, olderThanDays: days)
     }
 
     // MARK: - Migration

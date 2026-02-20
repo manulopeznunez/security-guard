@@ -12,6 +12,7 @@ struct PersistenceScannerView: View {
                     .foregroundStyle(.blue)
                 Text("Persistence Scanner")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .persistence)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()
@@ -66,8 +67,11 @@ struct PersistenceScannerView: View {
                     TableColumn("Label", value: \.label)
                         .width(min: 180)
 
-                    TableColumn("Executable", value: \.executablePath)
-                        .width(min: 200)
+                    TableColumn("Executable") { item in
+                        ClickablePath(path: item.executablePath, font: .caption)
+                            .lineLimit(1)
+                    }
+                    .width(min: 200)
 
                     TableColumn("Signed") { item in
                         let cleanName = FormatUtils.cleanAuthority(item.signatureAuthority)
@@ -244,5 +248,6 @@ struct PersistenceScannerView: View {
         } message: {
             Text("This will flag the item as quarantined. You can undo this later.")
         }
+        .task { viewModel.loadCached() }
     }
 }

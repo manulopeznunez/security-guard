@@ -15,6 +15,7 @@ struct AttackSurfaceView: View {
                     .foregroundStyle(.red)
                 Text("Attack Surface")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .attackSurface)
                 Spacer()
 
                 // Monitor status
@@ -60,9 +61,10 @@ struct AttackSurfaceView: View {
                 Text("Listening Ports").tag(0)
                 Text("SSH Security").tag(1)
                 Text("Exposed Services").tag(2)
+                Text("Sharing").tag(3)
             }
             .pickerStyle(.segmented)
-            .frame(width: 400)
+            .frame(width: 500)
             .padding(.horizontal)
             .padding(.vertical, 6)
 
@@ -72,6 +74,7 @@ struct AttackSurfaceView: View {
             case 0: listeningPortsTab
             case 1: sshSecurityTab
             case 2: exposedServicesTab
+            case 3: sharingTab
             default: EmptyView()
             }
         }
@@ -79,6 +82,7 @@ struct AttackSurfaceView: View {
             await viewModel.refreshPorts()
             await viewModel.scanSSH()
             await viewModel.scanServices()
+            await viewModel.scanSharing()
         }
     }
 
@@ -635,6 +639,79 @@ struct AttackSurfaceView: View {
                     .lineLimit(2)
             }
             .width(min: 200)
+        }
+    }
+
+    // MARK: - Tab 4: Sharing Preferences
+
+    private var sharingTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if viewModel.sharingServices.isEmpty && !viewModel.isScanning {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.green)
+                    Text("No sharing services active")
+                        .font(.headline)
+                    Text("AirPlay, SSH, Screen Sharing, File Sharing, Remote Management,\nInternet Sharing, and Content Caching are all inactive.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 500)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                sharingTable
+            }
+        }
+    }
+
+    private var sharingTable: some View {
+        Table(viewModel.sharingServices) {
+            TableColumn("") { service in
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(service.risk.color)
+                    .font(.caption2)
+            }
+            .width(25)
+
+            TableColumn("Service") { service in
+                Text(service.name)
+                    .font(.callout.bold())
+            }
+            .width(min: 160)
+
+            TableColumn("Risk") { service in
+                Text(service.risk.label)
+                    .font(.caption.bold())
+                    .foregroundStyle(service.risk.color)
+            }
+            .width(70)
+
+            TableColumn("Configuration") { service in
+                Text(service.configDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 180)
+
+            TableColumn("Description") { service in
+                Text(service.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .width(min: 200)
+
+            TableColumn("How to Disable") { service in
+                Text(service.howToDisable)
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                    .lineLimit(2)
+            }
+            .width(min: 220)
         }
     }
 }

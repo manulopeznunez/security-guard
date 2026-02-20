@@ -12,6 +12,7 @@ struct AppSignatureView: View {
                     .foregroundStyle(.blue)
                 Text("App Signatures")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .appSignatures)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()
@@ -159,5 +160,6 @@ struct AppSignatureView: View {
         } message: {
             Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
+        .task { viewModel.loadCached() }
     }
 }

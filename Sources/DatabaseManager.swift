@@ -138,6 +138,23 @@ final class DatabaseManager: Sendable {
         for sql in createApprovalHistorySQL.components(separatedBy: ";") where !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             execute(db: db, sql: sql)
         }
+
+        // Scan history (per-scanner summary of each scan run)
+        let createScanHistorySQL = """
+        CREATE TABLE IF NOT EXISTS scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            scanner TEXT NOT NULL,
+            total_items INTEGER NOT NULL DEFAULT 0,
+            flagged_items INTEGER NOT NULL DEFAULT 0,
+            summary TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_history_timestamp ON scan_history(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_scan_history_scanner ON scan_history(scanner);
+        """
+        for sql in createScanHistorySQL.components(separatedBy: ";") where !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            execute(db: db, sql: sql)
+        }
     }
 
     // MARK: - Insert
@@ -475,7 +492,7 @@ final class DatabaseManager: Sendable {
             let lastSeen = String(cString: sqlite3_column_text(stmt, 6))
             let timesSeen = Int(sqlite3_column_int(stmt, 7))
 
-            let (risk, reason) = Self.classifyPortRisk(port: port, processName: process, signature: signature)
+            let (risk, reason) = Self.classifyPortRisk(port: port, processName: process, signature: signature, localAddress: address)
 
             results.append(ListeningPortSummary(
                 localPort: port,
@@ -572,6 +589,141 @@ final class DatabaseManager: Sendable {
         return results
     }
 
+    // MARK: - Scan History
+
+    func insertScanHistory(scanner: String, total: Int, flagged: Int, summary: String) {
+        let db = open()
+        defer { close(db) }
+
+        let sql = "INSERT INTO scan_history (scanner, total_items, flagged_items, summary) VALUES (?, ?, ?, ?);"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        sqlite3_bind_text(stmt, 1, (scanner as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 2, Int32(total))
+        sqlite3_bind_int(stmt, 3, Int32(flagged))
+        sqlite3_bind_text(stmt, 4, (summary as NSString).utf8String, -1, nil)
+        sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+    }
+
+    func scanHistory(scanner: String? = nil, days: Int = 90) -> [ScanHistoryEntry] {
+        let db = open()
+        defer { close(db) }
+
+        let sql: String
+        if scanner != nil {
+            sql = """
+            SELECT id, timestamp, scanner, total_items, flagged_items, summary
+            FROM scan_history
+            WHERE timestamp >= datetime('now', 'localtime', ?1) AND scanner = ?2
+            ORDER BY timestamp DESC LIMIT 200;
+            """
+        } else {
+            sql = """
+            SELECT id, timestamp, scanner, total_items, flagged_items, summary
+            FROM scan_history
+            WHERE timestamp >= datetime('now', 'localtime', ?1)
+            ORDER BY timestamp DESC LIMIT 500;
+            """
+        }
+
+        var results: [ScanHistoryEntry] = []
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        let daysParam = "-\(days) days"
+        sqlite3_bind_text(stmt, 1, (daysParam as NSString).utf8String, -1, nil)
+        if let scanner {
+            sqlite3_bind_text(stmt, 2, (scanner as NSString).utf8String, -1, nil)
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let tsText = String(cString: sqlite3_column_text(stmt, 1))
+            results.append(ScanHistoryEntry(
+                id: Int(sqlite3_column_int(stmt, 0)),
+                timestamp: formatter.date(from: tsText) ?? Date(),
+                scanner: String(cString: sqlite3_column_text(stmt, 2)),
+                totalItems: Int(sqlite3_column_int(stmt, 3)),
+                flaggedItems: Int(sqlite3_column_int(stmt, 4)),
+                summary: String(cString: sqlite3_column_text(stmt, 5))
+            ))
+        }
+        sqlite3_finalize(stmt)
+        return results
+    }
+
+    // MARK: - Approval Date Queries
+
+    /// Returns the timestamp and action of the last approval/quarantine event for a specific item.
+    func lastActionDate(category: String, itemID: String) -> (action: String, date: Date)? {
+        let db = open()
+        defer { close(db) }
+
+        let sql = """
+        SELECT action, timestamp FROM approval_history
+        WHERE category = ?1 AND item_id = ?2
+        ORDER BY timestamp DESC LIMIT 1;
+        """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(stmt, 1, (category as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 2, (itemID as NSString).utf8String, -1, nil)
+
+        var result: (String, Date)?
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let action = String(cString: sqlite3_column_text(stmt, 0))
+            let tsString = String(cString: sqlite3_column_text(stmt, 1))
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            if let date = formatter.date(from: tsString) {
+                result = (action, date)
+            }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
+    /// Items whose last approval is older than N days — candidates for rotation review.
+    func staleApprovals(category: String, olderThanDays: Int) -> [ApprovalEvent] {
+        let db = open()
+        defer { close(db) }
+
+        // For each item_id in the category, find its most recent action.
+        // Return items whose last "approved" action is older than the threshold.
+        let sql = """
+        SELECT ah.timestamp, ah.category, ah.item_id, ah.action
+        FROM approval_history ah
+        INNER JOIN (
+            SELECT item_id, MAX(id) as max_id
+            FROM approval_history
+            WHERE category = ?1 AND action = 'approved'
+            GROUP BY item_id
+        ) latest ON ah.id = latest.max_id
+        WHERE ah.timestamp < datetime('now', 'localtime', ?2);
+        """
+
+        var results: [ApprovalEvent] = []
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        sqlite3_bind_text(stmt, 1, (category as NSString).utf8String, -1, nil)
+        let daysParam = "-\(olderThanDays) days"
+        sqlite3_bind_text(stmt, 2, (daysParam as NSString).utf8String, -1, nil)
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(ApprovalEvent(
+                timestamp: String(cString: sqlite3_column_text(stmt, 0)),
+                category: String(cString: sqlite3_column_text(stmt, 1)),
+                itemID: String(cString: sqlite3_column_text(stmt, 2)),
+                action: String(cString: sqlite3_column_text(stmt, 3))
+            ))
+        }
+        sqlite3_finalize(stmt)
+        return results
+    }
+
     // MARK: - Port Risk Classification
 
     private static let dangerousPorts: Set<String> = ["22", "5900", "5988", "3283", "548", "445"]
@@ -580,14 +732,56 @@ final class DatabaseManager: Sendable {
         "8080", "8443", "8000", "8888", "9090", "9200", "11211", "15672", "2375"
     ]
 
-    static func classifyPortRisk(port: String, processName: String, signature: String) -> (PortRisk, String) {
-        if dangerousPorts.contains(port) {
-            return (.dangerous, "High-risk service port (\(port))")
+    /// Cached macOS version, computed once per process lifetime.
+    private static let cachedOSVersion: String = {
+        let result = ShellExecutor.run("/usr/bin/sw_vers", arguments: ["-productVersion"])
+        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }()
+
+    static func classifyPortRisk(
+        port: String,
+        processName: String,
+        signature: String,
+        localAddress: String = "*"
+    ) -> (PortRisk, String) {
+        let isLocalOnly = localAddress == "127.0.0.1" || localAddress == "::1" || localAddress == "localhost"
+
+        // 1. Try to fingerprint the service
+        if let serviceName = SystemCVEDatabase.identifyService(processName: processName, port: port) {
+            let cves = SystemCVEDatabase.vulnerabilities(for: serviceName, osVersion: cachedOSVersion)
+
+            if !cves.isEmpty {
+                let hasWormable = cves.contains { $0.wormable }
+                let worstSeverity = cves.map(\.severity).max() ?? .unknown
+                let cveList = cves.prefix(3).map(\.id).joined(separator: ", ")
+
+                if hasWormable && !isLocalOnly {
+                    return (.dangerous, "\(serviceName) — \(cveList) (wormable, \(worstSeverity.label), network-exposed)")
+                }
+                if isLocalOnly {
+                    return (.warning, "\(serviceName) — \(cveList) (\(worstSeverity.label), localhost only)")
+                }
+                if worstSeverity >= .high {
+                    return (.dangerous, "\(serviceName) — \(cveList) (\(worstSeverity.label), network-exposed)")
+                }
+                return (.warning, "\(serviceName) — \(cveList) (\(worstSeverity.label))")
+            }
+
+            // Fingerprinted, no unpatched CVEs
+            return (.safe, "\(serviceName) (patched)")
         }
+
+        // 2. Not fingerprinted — existing logic with binding address awareness
         if signature.isEmpty || signature == "unsigned" {
             return (.dangerous, "Unsigned process listening on port \(port)")
         }
+        if dangerousPorts.contains(port) {
+            return (.dangerous, "High-risk service port (\(port))")
+        }
         if devPorts.contains(port) {
+            if isLocalOnly {
+                return (.safe, "Development/database port (\(port), localhost only)")
+            }
             return (.warning, "Development/database port (\(port))")
         }
         return (.safe, "Signed process on standard port")
@@ -785,4 +979,13 @@ struct ApprovalEvent: Identifiable, Sendable {
     let category: String
     let itemID: String
     let action: String
+}
+
+struct ScanHistoryEntry: Identifiable, Sendable {
+    let id: Int
+    let timestamp: Date
+    let scanner: String
+    let totalItems: Int
+    let flaggedItems: Int
+    let summary: String
 }

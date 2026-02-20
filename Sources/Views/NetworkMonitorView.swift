@@ -34,6 +34,7 @@ struct NetworkMonitorView: View {
                     .foregroundStyle(.blue)
                 Text("Network Monitor")
                     .font(.title.bold())
+                ScanDateLabel(scanner: .networkMonitor)
                 Spacer()
                 if viewModel.isScanning {
                     ProgressView()

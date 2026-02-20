@@ -1,12 +1,16 @@
 import Foundation
 
-enum HomebrewPackageType: String, Sendable {
+enum HomebrewPackageType: String, Sendable, Codable {
     case formula
     case cask
 }
 
-struct HomebrewPackage: Identifiable, Sendable {
+struct HomebrewPackage: Identifiable, Sendable, Codable {
     let id = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case name, type, installedVersion, currentVersion, pinned, isLeaf, risk, riskReason
+    }
     let name: String
     let type: HomebrewPackageType
     let installedVersion: String

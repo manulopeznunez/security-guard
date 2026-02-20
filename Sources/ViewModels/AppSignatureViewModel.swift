@@ -20,6 +20,35 @@ final class AppSignatureViewModel {
         // Cache flagged items for Security Status
         let flagged = results.filter { !$0.isValid }.map(\.appPath)
         ApprovalManager.recordScanResults(.appSignature, flaggedIDs: flagged)
+
+        Self.saveCachedResult(results)
+        ScanDateTracker.record(.appSignatures)
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "appSignatures", total: results.count, flagged: flagged.count,
+            summary: "\(results.count) apps, \(flagged.count) invalid signatures"
+        )
+    }
+
+    func loadCached() {
+        if let cached = Self.loadCachedResult() { apps = cached }
+    }
+
+    // MARK: - JSON Cache
+
+    nonisolated private static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MacSecurityGuard", isDirectory: true)
+            .appendingPathComponent("app-signatures-cache.json")
+    }
+
+    nonisolated private static func saveCachedResult(_ result: [AppSignatureEntry]) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    nonisolated static func loadCachedResult() -> [AppSignatureEntry]? {
+        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+        return try? JSONDecoder().decode([AppSignatureEntry].self, from: data)
     }
 
     nonisolated static func performScan(onProgress: @Sendable @escaping (String) -> Void) async -> [AppSignatureEntry] {

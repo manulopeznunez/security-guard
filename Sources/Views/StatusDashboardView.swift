@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct StatusDashboardView: View {
+    @Binding var selectedTab: TabSection
     @State private var viewModel = SecurityStatusViewModel()
 
     var body: some View {
@@ -181,7 +182,7 @@ struct StatusDashboardView: View {
                 spacing: 10
             ) {
                 ForEach(items) { item in
-                    SecurityGridCard(item: item, viewModel: viewModel)
+                    SecurityGridCard(item: item, viewModel: viewModel, selectedTab: $selectedTab)
                 }
             }
         }
@@ -234,9 +235,12 @@ struct StatusDashboardView: View {
 struct SecurityGridCard: View {
     let item: SecurityItem
     let viewModel: SecurityStatusViewModel
+    @Binding var selectedTab: TabSection
 
     @State private var isHovering = false
     @State private var showDetail = false
+
+    private var isNavigable: Bool { item.targetTab != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -246,13 +250,20 @@ struct SecurityGridCard: View {
                     .font(.system(size: 20))
                     .foregroundStyle(item.status.color)
                 Spacer()
-                Text(item.status.label)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(item.status.color)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(item.status.pillBackground)
-                    .clipShape(Capsule())
+                HStack(spacing: 4) {
+                    if isNavigable {
+                        Image(systemName: "arrow.right.circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.fpeMuted.opacity(isHovering ? 1 : 0.5))
+                    }
+                    Text(item.status.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(item.status.color)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(item.status.pillBackground)
+                        .clipShape(Capsule())
+                }
             }
 
             // Name
@@ -306,9 +317,18 @@ struct SecurityGridCard: View {
                 .stroke(isHovering ? Color.fpePrimary.opacity(0.5) : Color.fpeBorder, lineWidth: 1)
         )
         .shadow(color: .black.opacity(isHovering ? 0.08 : 0.02), radius: isHovering ? 6 : 2, y: isHovering ? 3 : 1)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let tab = item.targetTab {
+                selectedTab = tab
+            }
+        }
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
+            }
+            if isNavigable {
+                if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
         }
     }

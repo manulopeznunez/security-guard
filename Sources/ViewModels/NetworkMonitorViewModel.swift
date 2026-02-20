@@ -25,6 +25,12 @@ final class NetworkMonitorViewModel {
         connections = resolved
         progress = "Done. \(resolved.count) connections."
         isScanning = false
+        ScanDateTracker.record(.networkMonitor)
+        let unsignedCount = resolved.filter { !$0.isSigned }.count
+        DatabaseManager.shared.insertScanHistory(
+            scanner: "networkMonitor", total: resolved.count, flagged: unsignedCount,
+            summary: "\(resolved.count) connections, \(unsignedCount) unsigned"
+        )
     }
 
     nonisolated static func getConnections() async -> [NetworkConnection] {
