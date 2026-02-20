@@ -27,6 +27,9 @@ final class KnockKnockViewModel {
         }
         result = scanResult
         isScanning = false
+
+        let flaggedKK = scanResult.flaggedItems.map(\.path)
+        ApprovalManager.recordScanResults(.knockknock, flaggedIDs: flaggedKK)
     }
 
     func loadCached() {
@@ -67,7 +70,7 @@ final class KnockKnockViewModel {
             AuditLogger.security.warning("KnockKnock failed: \(msg, privacy: .public)")
             return errorResult(
                 isFDA
-                    ? "Full Disk Access required. Grant it in System Settings > Privacy & Security > Full Disk Access."
+                    ? "Full Disk Access required for the app running KnockKnock. Grant it to Security Guard (or Terminal if running via swift run) in System Settings > Privacy & Security > Full Disk Access."
                     : msg,
                 fdaAvailable: !isFDA
             )

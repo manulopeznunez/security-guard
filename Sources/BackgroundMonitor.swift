@@ -50,8 +50,79 @@ final class BackgroundMonitor {
             formatter.dateFormat = "HH:mm:ss"
             lastSnapshot = formatter.string(from: Date())
             AuditLogger.audit.info("Snapshot captured: \(snapshots.count) connections")
+
+            // Cache flagged network processes for Security Status
+            Self.cacheFlaggedNetworkProcesses(snapshots)
+
+            // Check if any quarantined process reappeared in this snapshot
+            Self.checkQuarantineReappearance(snapshots)
         } else {
             AuditLogger.audit.info("Snapshot empty: no active connections")
+        }
+
+        // Capture listening ports for attack surface monitoring
+        let listeningPorts = await Self.collectListeningPorts()
+        if !listeningPorts.isEmpty {
+            DatabaseManager.shared.insertListeningPorts(listeningPorts)
+            AuditLogger.audit.info("Listening ports captured: \(listeningPorts.count)")
+        }
+    }
+
+    /// Save flagged network process IDs so Security Status can show pending reviews.
+    /// Key format matches NetworkHistoryView: uses path when available, falls back to processName.
+    nonisolated private static func cacheFlaggedNetworkProcesses(_ snapshots: [ConnectionSnapshot]) {
+        var flaggedIDs = Set<String>()
+        for snap in snapshots {
+            let hasInjectionRisk = !snap.injectionRisk.isEmpty
+            let isUnsigned = snap.parentSignature.isEmpty && snap.parentName.isEmpty
+            let processKey = snap.processPath.isEmpty ? snap.processName : snap.processPath
+
+            if hasInjectionRisk {
+                flaggedIDs.insert("\(processKey)|\(snap.injectionRisk)")
+            } else if isUnsigned {
+                flaggedIDs.insert(processKey)
+            }
+        }
+        if !flaggedIDs.isEmpty {
+            // Merge with existing flagged IDs (don't replace — accumulate across snapshots)
+            let existing = ApprovalManager.flaggedIDs(for: .networkMonitor)
+            let merged = Set(existing).union(flaggedIDs)
+            ApprovalManager.saveFlagged(.networkMonitor, ids: Array(merged))
+        } else if !ApprovalManager.hasBeenScanned(.networkMonitor) {
+            // First snapshot with no flags — mark as scanned with empty list
+            ApprovalManager.saveFlagged(.networkMonitor, ids: [])
+        }
+    }
+
+    /// Check if any quarantined network process reappeared in the latest snapshot.
+    nonisolated private static func checkQuarantineReappearance(_ snapshots: [ConnectionSnapshot]) {
+        let allQuarantined = ApprovalManager.allQuarantinedEntries()
+        guard !allQuarantined.isEmpty else { return }
+
+        let networkPrefix = "\(ApprovalManager.Category.networkMonitor.rawValue):"
+        let quarantinedNetworkIDs = allQuarantined
+            .filter { $0.hasPrefix(networkPrefix) }
+            .map { String($0.dropFirst(networkPrefix.count)) }
+        guard !quarantinedNetworkIDs.isEmpty else { return }
+
+        let quarantinedSet = Set(quarantinedNetworkIDs)
+        var alerted = Set<String>()
+
+        for snap in snapshots {
+            let processKey = snap.processPath.isEmpty ? snap.processName : snap.processPath
+            let keysToCheck: [String]
+            if !snap.injectionRisk.isEmpty {
+                keysToCheck = ["\(processKey)|\(snap.injectionRisk)", "\(snap.processName)|\(snap.injectionRisk)"]
+            } else {
+                keysToCheck = [processKey, snap.processName]
+            }
+            for key in keysToCheck where quarantinedSet.contains(key) && !alerted.contains(key) {
+                alerted.insert(key)
+                NotificationService.sendQuarantineReappearanceAlert(
+                    categoryRawValue: ApprovalManager.Category.networkMonitor.rawValue,
+                    itemID: key
+                )
+            }
         }
     }
 
@@ -96,19 +167,19 @@ final class BackgroundMonitor {
             // 4. Run full scanners and cache flagged items
             let processResults = await ProcessScannerViewModel.performScan(onProgress: { _ in })
             let flaggedProcesses = processResults.filter { $0.signatureValid == false }.map(\.path)
-            ApprovalManager.saveFlagged(.process, ids: flaggedProcesses)
+            ApprovalManager.recordScanResults(.process, flaggedIDs: flaggedProcesses)
 
             let persistenceResults = await PersistenceScannerViewModel.performScan()
             let flaggedPersistence = persistenceResults.filter(\.needsReview).map(\.executablePath)
-            ApprovalManager.saveFlagged(.persistence, ids: flaggedPersistence)
+            ApprovalManager.recordScanResults(.persistence, flaggedIDs: flaggedPersistence)
 
             let appResults = await AppSignatureViewModel.performScan(onProgress: { _ in })
             let flaggedApps = appResults.filter { !$0.isValid }.map(\.appPath)
-            ApprovalManager.saveFlagged(.appSignature, ids: flaggedApps)
+            ApprovalManager.recordScanResults(.appSignature, flaggedIDs: flaggedApps)
 
             let extResults = ChromeExtensionViewModel.performScan()
             let flaggedExts = extResults.filter { $0.risk == .high }.map(\.extensionId)
-            ApprovalManager.saveFlagged(.chromeExtension, ids: flaggedExts)
+            ApprovalManager.recordScanResults(.chromeExtension, flaggedIDs: flaggedExts)
 
             // 4b. KnockKnock deep persistence scan (if installed)
             if FileManager.default.isExecutableFile(
@@ -116,8 +187,42 @@ final class BackgroundMonitor {
             ) {
                 let kkResult = await KnockKnockViewModel.performScan()
                 let flaggedKK = kkResult.flaggedItems.map(\.path)
-                ApprovalManager.saveFlagged(.knockknock, ids: flaggedKK)
+                ApprovalManager.recordScanResults(.knockknock, flaggedIDs: flaggedKK)
             }
+
+            // 4c. Homebrew package health check (if installed)
+            if SecurityStatusViewModel.brewPath() != nil {
+                let brewResult = await HomebrewScannerViewModel.performScan()
+                let flaggedBrew = brewResult.packages.filter(\.needsReview).map(\.approvalID)
+                ApprovalManager.recordScanResults(.homebrew, flaggedIDs: flaggedBrew)
+            }
+
+            // 4d. Attack surface — flag dangerous/warning listening ports from DB
+            let listeningPorts = DatabaseManager.shared.topListeningPorts(days: 7)
+            let flaggedPorts = listeningPorts.filter { $0.risk != .safe }.map(\.approvalID)
+            ApprovalManager.recordScanResults(.attackSurface, flaggedIDs: flaggedPorts)
+
+            // 4e. TCC Permissions (only if FDA available)
+            let tccResult = await PermissionsViewModel.performTCCScan()
+            if tccResult.fdaAvailable {
+                let flaggedTCC = tccResult.entries.filter(\.needsReview).map(\.approvalID)
+                ApprovalManager.recordScanResults(.tccPermission, flaggedIDs: flaggedTCC)
+            }
+
+            // 4f. Sudo configuration
+            let sudoResult = await PermissionsViewModel.performSudoScan()
+            let flaggedSudo = sudoResult.filter(\.needsReview).map(\.approvalID)
+            ApprovalManager.recordScanResults(.sudoConfig, flaggedIDs: flaggedSudo)
+
+            // 4g. Users & Groups
+            let usersResult = await PermissionsViewModel.performUsersScan()
+            let flaggedUsers = usersResult.users.filter(\.needsReview).map(\.approvalID)
+            ApprovalManager.recordScanResults(.usersGroups, flaggedIDs: flaggedUsers)
+
+            // 4h. Config Guard (dotfile integrity)
+            let configResult = await ConfigGuardViewModel.performScan()
+            let flaggedConfig = configResult.filter(\.needsReview).map(\.approvalID)
+            ApprovalManager.recordScanResults(.configGuard, flaggedIDs: flaggedConfig)
 
             // 5. Update UI properties on MainActor
             let score = total > 0 ? Double(enabled) / Double(total) : 0
@@ -202,13 +307,15 @@ final class BackgroundMonitor {
             ))
         }
 
-        // 4. Resolve real process names via PID (fixes "2.1.49" → "claude")
+        // 4. Resolve real process names and paths via PID (fixes "2.1.49" → "claude")
         let uniquePIDs = Set(rawConnections.map(\.pid))
         var pidNameCache: [Int: String] = [:]
+        var pidPathCache: [Int: String] = [:]
         for pid in uniquePIDs {
             let result = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="])
             let fullPath = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             if !fullPath.isEmpty {
+                pidPathCache[pid] = fullPath
                 pidNameCache[pid] = URL(fileURLWithPath: fullPath).lastPathComponent
             }
         }
@@ -251,6 +358,14 @@ final class BackgroundMonitor {
             injectionCache[pid] = detectInjection(pid: pid)
         }
 
+        // 8b. Collect comprehensive process trace for each unique PID
+        var traceCache: [Int: String] = [:]
+        for pid in uniquePIDs {
+            let resolvedName = pidNameCache[pid] ?? ""
+            let chain = parentCache[pid]?.chain ?? ""
+            traceCache[pid] = collectProcessTrace(pid: pid, processName: resolvedName, parentChain: chain)
+        }
+
         // 9. Build snapshots
         return rawConnections.map { conn in
             let resolvedName = pidNameCache[conn.pid] ?? conn.processName
@@ -278,7 +393,9 @@ final class BackgroundMonitor {
                 parentPath: parent.path,
                 parentSignature: parent.signature,
                 injectionRisk: injection,
-                parentChain: parent.chain
+                parentChain: parent.chain,
+                processTrace: traceCache[conn.pid] ?? "",
+                processPath: pidPathCache[conn.pid] ?? ""
             )
         }
     }
@@ -373,51 +490,134 @@ final class BackgroundMonitor {
     }
 
     /// Check a process for signs of dylib injection.
+    /// Only checks for DYLD_INSERT_LIBRARIES — the actual injection vector.
+    /// System dylibs (/usr/lib/, /System/) are protected by SSV and not checked,
+    /// as they always report as "unsigned" when inspected individually from the shared cache.
     nonisolated private static func detectInjection(pid: Int) -> String {
         var risks: [String] = []
 
-        // Check 1: DYLD_INSERT_LIBRARIES
-        // ps environ= may be blocked by hardened runtime — that's fine (means protected)
+        // Check: DYLD_INSERT_LIBRARIES — the real injection vector
         let dyldResult = ShellExecutor.shell("/bin/ps eww -p \(pid) 2>/dev/null | tr '\\0' '\\n' | grep DYLD_INSERT_LIBRARIES")
         if dyldResult.exitCode == 0 && !dyldResult.output.isEmpty {
             let libs = dyldResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
             risks.append("DYLD_INSERT_LIBRARIES: \(libs)")
         }
 
-        // Check 2: Unsigned dylibs loaded into signed processes
-        let pidPath = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="]).output
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !pidPath.isEmpty else { return risks.joined(separator: "; ") }
+        return risks.joined(separator: "; ")
+    }
 
-        let isSigned = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", pidPath]).exitCode == 0
-        if isSigned {
-            let vmmapResult = ShellExecutor.shell("/usr/bin/vmmap \(pid) 2>/dev/null | grep '\\.dylib'")
-            if vmmapResult.exitCode == 0 {
-                let trustedPrefixes = ["/usr/lib/", "/System/", "/Library/Apple/", "/opt/homebrew/"]
-                var checkedPaths = Set<String>()
+    /// Collect comprehensive process trace for later analysis.
+    nonisolated private static func collectProcessTrace(pid: Int, processName: String, parentChain: String) -> String {
+        var trace: [String] = []
+        trace.append("=== Process Trace: \(processName) (PID \(pid)) ===")
 
-                for line in vmmapResult.output.components(separatedBy: "\n") {
-                    guard let slashRange = line.range(of: "/") else { continue }
-                    var dylibPath = String(line[slashRange.lowerBound...])
-                        .trimmingCharacters(in: .whitespaces)
-                    if let dylibEnd = dylibPath.range(of: ".dylib") {
-                        dylibPath = String(dylibPath[..<dylibEnd.upperBound])
-                            .trimmingCharacters(in: .whitespaces)
-                    }
-                    guard !dylibPath.isEmpty, !checkedPaths.contains(dylibPath) else { continue }
-                    checkedPaths.insert(dylibPath)
+        // Full executable path
+        let commResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="])
+        let fullPath = commResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        trace.append("Path: \(fullPath.isEmpty ? "unknown" : fullPath)")
 
-                    if trustedPrefixes.contains(where: { dylibPath.hasPrefix($0) }) { continue }
+        // Full command line args
+        let argsResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "args=", "-ww"])
+        trace.append("Args: \(argsResult.output.trimmingCharacters(in: .whitespacesAndNewlines))")
 
-                    let dylibVerify = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", dylibPath])
-                    if dylibVerify.exitCode != 0 {
-                        risks.append("Unsigned dylib: \(dylibPath)")
-                    }
-                }
+        // User and start time
+        let infoResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "user=,lstart=,ppid="])
+        trace.append("Info: \(infoResult.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+
+        // Parent chain
+        trace.append("Parent chain: \(parentChain.isEmpty ? "unknown" : parentChain)")
+
+        // Code signature details (full codesign -dvvv)
+        if !fullPath.isEmpty {
+            let codesignResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-dvvv", fullPath])
+            let csOutput = (codesignResult.output + "\n" + codesignResult.error).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !csOutput.isEmpty {
+                trace.append("--- Codesign ---")
+                trace.append(csOutput)
             }
         }
 
-        return risks.joined(separator: "; ")
+        // Network connections for this PID (lsof)
+        let lsofResult = ShellExecutor.shell("lsof +c 0 -i -n -P -p \(pid) 2>/dev/null | head -30")
+        if !lsofResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            trace.append("--- Open connections ---")
+            trace.append(lsofResult.output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        // Open files (non-network, first 20)
+        let filesResult = ShellExecutor.shell("lsof -p \(pid) 2>/dev/null | grep -v 'IPv[46]' | tail -20")
+        if !filesResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            trace.append("--- Open files (last 20) ---")
+            trace.append(filesResult.output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        return trace.joined(separator: "\n")
+    }
+
+    // MARK: - Listening Ports Collection
+
+    /// Collects currently listening ports for attack surface monitoring.
+    nonisolated static func collectListeningPorts() async -> [ListeningPortSnapshot] {
+        let lsofResult = ShellExecutor.shell("lsof +c 0 -i -n -P 2>/dev/null | grep LISTEN")
+        let lines = lsofResult.output.components(separatedBy: "\n").filter { !$0.isEmpty }
+
+        var seen = Set<String>() // Deduplicate by port+process
+        var results: [ListeningPortSnapshot] = []
+
+        for line in lines {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            guard parts.count >= 9 else { continue }
+
+            let processName = parts[0].replacingOccurrences(of: "\\x20", with: " ")
+            let pid = Int(parts[1]) ?? 0
+
+            // Extract local address:port from the NAME column
+            let namePart = parts.dropFirst(8).joined(separator: " ")
+                .replacingOccurrences(of: "(LISTEN)", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            let (localAddress, localPort) = parseAddressPort(namePart)
+
+            guard !localPort.isEmpty else { continue }
+
+            // Deduplicate
+            let key = "\(localPort):\(processName)"
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+
+            // Resolve real process name via PID
+            let commResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="])
+            let processPath = commResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedName: String
+            if !processPath.isEmpty {
+                resolvedName = URL(fileURLWithPath: processPath).lastPathComponent
+            } else {
+                resolvedName = processName
+            }
+
+            // Get signature
+            let signature: String
+            if !processPath.isEmpty {
+                let verifyResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", processPath])
+                if verifyResult.exitCode == 0 {
+                    signature = extractAuthority(path: processPath)
+                } else {
+                    signature = "unsigned"
+                }
+            } else {
+                signature = ""
+            }
+
+            results.append(ListeningPortSnapshot(
+                processName: resolvedName,
+                pid: pid,
+                localPort: localPort,
+                localAddress: localAddress,
+                processPath: processPath,
+                parentSignature: signature
+            ))
+        }
+
+        return results
     }
 
     nonisolated private static func parseAddressPort(_ input: String) -> (String, String) {

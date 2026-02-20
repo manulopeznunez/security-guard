@@ -5,6 +5,7 @@ struct KnockKnockView: View {
     @State private var viewModel = KnockKnockViewModel()
     @State private var selectedCategory: String? = nil
     @State private var showFileImporter = false
+    @State private var itemToQuarantine: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -41,6 +42,23 @@ struct KnockKnockView: View {
                     ApprovalManager.saveFlagged(.knockknock, ids: flagged)
                 }
             }
+        }
+        .alert("Quarantine this item?", isPresented: Binding<Bool>(
+            get: { itemToQuarantine != nil },
+            set: { if !$0 { itemToQuarantine = nil } }
+        )) {
+            Button("Quarantine", role: .destructive) {
+                if let id = itemToQuarantine {
+                    ApprovalManager.quarantine(.knockknock, id: id)
+                    itemToQuarantine = nil
+                    viewModel.loadCached()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                itemToQuarantine = nil
+            }
+        } message: {
+            Text("This will flag the item as quarantined. You can undo this later.")
         }
     }
 
@@ -138,10 +156,19 @@ struct KnockKnockView: View {
 
     private func itemTable(_ result: KnockKnockResult) -> some View {
         let items: [KnockKnockItem] = {
+            let raw: [KnockKnockItem]
             if let cat = selectedCategory {
-                return result.categories[cat] ?? []
+                raw = result.categories[cat] ?? []
+            } else {
+                raw = result.categories.values.flatMap { $0 }
             }
-            return result.categories.values.flatMap { $0 }.sorted { $0.name < $1.name }
+            // Sort: flagged items needing review first, then by name
+            return raw.sorted { a, b in
+                let aNeeds = isFlagged(a) && !ApprovalManager.isApproved(.knockknock, id: a.path)
+                let bNeeds = isFlagged(b) && !ApprovalManager.isApproved(.knockknock, id: b.path)
+                if aNeeds != bNeeds { return aNeeds }
+                return a.name.localizedCompare(b.name) == .orderedAscending
+            }
         }()
 
         return Table(items) {
@@ -186,33 +213,71 @@ struct KnockKnockView: View {
 
             TableColumn("Review") { item in
                 if isFlagged(item) {
-                    let approved = ApprovalManager.isApproved(.knockknock, id: item.path)
-                    if approved {
-                        Button {
-                            ApprovalManager.revoke(.knockknock, id: item.path)
-                            viewModel.loadCached()
-                        } label: {
-                            Label("Revoke", systemImage: "xmark.shield")
+                    HStack(spacing: 4) {
+                        let approved = ApprovalManager.isApproved(.knockknock, id: item.path)
+                        let quarantined = ApprovalManager.isQuarantined(.knockknock, id: item.path)
+                        if quarantined {
+                            Label("Quarantined", systemImage: "exclamationmark.octagon.fill")
                                 .font(.caption2)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red)
+                                .clipShape(Capsule())
+                            Button {
+                                ApprovalManager.unquarantine(.knockknock, id: item.path)
+                                viewModel.loadCached()
+                            } label: {
+                                Label("Remove", systemImage: "arrow.uturn.backward")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                        } else if approved {
+                            Button {
+                                ApprovalManager.revoke(.knockknock, id: item.path)
+                                viewModel.loadCached()
+                            } label: {
+                                Label("Revoke", systemImage: "xmark.shield")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .tint(.red)
+                        } else {
+                            Button {
+                                ApprovalManager.approve(.knockknock, id: item.path)
+                                viewModel.loadCached()
+                            } label: {
+                                Label("Approve", systemImage: "checkmark.shield")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.mini)
+                            .tint(.green)
+                            Button {
+                                itemToQuarantine = item.path
+                            } label: {
+                                Label("Quarantine", systemImage: "exclamationmark.octagon")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .tint(.red)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .tint(.red)
-                    } else {
+
                         Button {
-                            ApprovalManager.approve(.knockknock, id: item.path)
-                            viewModel.loadCached()
+                            UninstallHelper.investigateKnockKnockWithClaude(item: item)
                         } label: {
-                            Label("Approve", systemImage: "checkmark.shield")
-                                .font(.caption2)
+                            Image(systemName: "sparkle.magnifyingglass")
+                                .foregroundStyle(.purple)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.mini)
-                        .tint(.green)
+                        .buttonStyle(.plain)
+                        .help("Investigate with Claude Code")
                     }
                 }
             }
-            .width(100)
+            .width(130)
         }
     }
 
@@ -305,11 +370,19 @@ struct KnockKnockView: View {
                 .foregroundStyle(fdaAvailable ? .orange : .red)
             Text(fdaAvailable ? "Scan Failed" : "Full Disk Access Required")
                 .font(.headline)
-            Text(error)
-                .foregroundStyle(.secondary)
-                .font(.callout)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
+            if !fdaAvailable {
+                Text("KnockKnock CLI needs Full Disk Access granted to Security Guard (or Terminal if running via swift run).")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+            } else {
+                Text(error)
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+            }
             if !fdaAvailable {
                 Button("Open Privacy Settings") {
                     Task {

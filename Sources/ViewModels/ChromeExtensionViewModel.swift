@@ -17,7 +17,7 @@ final class ChromeExtensionViewModel {
 
         // Cache flagged items for Security Status
         let flagged = results.filter { $0.risk == .high }.map(\.extensionId)
-        ApprovalManager.saveFlagged(.chromeExtension, ids: flagged)
+        ApprovalManager.recordScanResults(.chromeExtension, flaggedIDs: flagged)
     }
 
     nonisolated static func performScan() -> [ChromeExtensionEntry] {

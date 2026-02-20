@@ -1,7 +1,8 @@
 import Foundation
 
-/// Centralized approval system for items flagged across all scanners.
-/// Items without valid signatures require manual user approval.
+/// Centralized approval and quarantine system for items flagged across all scanners.
+/// Items without valid signatures require manual user review.
+/// Three states: pending (default), approved (safe), quarantined (dangerous).
 /// Persisted in UserDefaults across sessions.
 enum ApprovalManager {
     enum Category: String {
@@ -10,7 +11,16 @@ enum ApprovalManager {
         case appSignature = "app"
         case chromeExtension = "extension"
         case knockknock = "knockknock"
+        case networkMonitor = "network"
+        case homebrew = "homebrew"
+        case attackSurface = "surface"
+        case tccPermission = "tcc"
+        case configGuard = "config"
+        case sudoConfig = "sudo"
+        case usersGroups = "users"
     }
+
+    // MARK: - Approval storage
 
     private static let key = "ApprovedSecurityItems"
 
@@ -26,16 +36,79 @@ enum ApprovalManager {
         store.contains("\(category.rawValue):\(id)")
     }
 
+    /// Approve an item. Auto-revokes quarantine (mutually exclusive states).
     static func approve(_ category: Category, id: String) {
+        // Remove quarantine if present (mutually exclusive)
+        var q = quarantineStore
+        if q.remove("\(category.rawValue):\(id)") != nil {
+            saveQuarantine(q)
+        }
+
         var s = store
         s.insert("\(category.rawValue):\(id)")
         save(s)
+        DatabaseManager.shared.insertApprovalEvent(
+            category: category.rawValue, itemID: id, action: "approved"
+        )
     }
 
     static func revoke(_ category: Category, id: String) {
         var s = store
         s.remove("\(category.rawValue):\(id)")
         save(s)
+        DatabaseManager.shared.insertApprovalEvent(
+            category: category.rawValue, itemID: id, action: "revoked"
+        )
+    }
+
+    // MARK: - Quarantine storage
+
+    private static let quarantineKey = "QuarantinedSecurityItems"
+
+    private static var quarantineStore: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: quarantineKey) ?? [])
+    }
+
+    private static func saveQuarantine(_ store: Set<String>) {
+        UserDefaults.standard.set(Array(store), forKey: quarantineKey)
+    }
+
+    static func isQuarantined(_ category: Category, id: String) -> Bool {
+        quarantineStore.contains("\(category.rawValue):\(id)")
+    }
+
+    /// Quarantine an item. Auto-revokes approval (mutually exclusive states).
+    static func quarantine(_ category: Category, id: String) {
+        // Remove approval if present (mutually exclusive)
+        var s = store
+        if s.remove("\(category.rawValue):\(id)") != nil {
+            save(s)
+        }
+
+        var q = quarantineStore
+        q.insert("\(category.rawValue):\(id)")
+        saveQuarantine(q)
+        DatabaseManager.shared.insertApprovalEvent(
+            category: category.rawValue, itemID: id, action: "quarantined"
+        )
+    }
+
+    static func unquarantine(_ category: Category, id: String) {
+        var q = quarantineStore
+        q.remove("\(category.rawValue):\(id)")
+        saveQuarantine(q)
+        DatabaseManager.shared.insertApprovalEvent(
+            category: category.rawValue, itemID: id, action: "unquarantined"
+        )
+    }
+
+    static func quarantinedCount(for category: Category) -> Int {
+        flaggedIDs(for: category).filter { isQuarantined(category, id: $0) }.count
+    }
+
+    /// Returns all quarantined entries across all categories as "category:id" strings.
+    static func allQuarantinedEntries() -> Set<String> {
+        quarantineStore
     }
 
     // MARK: - Flagged items cache
@@ -54,8 +127,11 @@ enum ApprovalManager {
         allFlagged()[category.rawValue] ?? []
     }
 
+    /// Items that are neither approved nor quarantined (still need triage).
     static func pendingCount(for category: Category) -> Int {
-        flaggedIDs(for: category).filter { !isApproved(category, id: $0) }.count
+        flaggedIDs(for: category).filter {
+            !isApproved(category, id: $0) && !isQuarantined(category, id: $0)
+        }.count
     }
 
     static func hasBeenScanned(_ category: Category) -> Bool {
@@ -64,6 +140,59 @@ enum ApprovalManager {
 
     private static func allFlagged() -> [String: [String]] {
         UserDefaults.standard.dictionary(forKey: flaggedKey) as? [String: [String]] ?? [:]
+    }
+
+    // MARK: - Unified post-scan handler
+
+    /// Saves flagged items, checks quarantine reappearances, and prunes orphaned entries.
+    /// All scanners should call this after scanning instead of saveFlagged() directly.
+    static func recordScanResults(_ category: Category, flaggedIDs: [String]) {
+        saveFlagged(category, ids: flaggedIDs)
+
+        for id in flaggedIDs where isQuarantined(category, id: id) {
+            NotificationService.sendQuarantineReappearanceAlert(
+                categoryRawValue: category.rawValue,
+                itemID: id
+            )
+        }
+
+        pruneOrphanedEntries(category, currentIDs: Set(flaggedIDs))
+    }
+
+    /// Remove approval and quarantine entries for a category whose IDs
+    /// are no longer in the current flagged list.
+    private static func pruneOrphanedEntries(_ category: Category, currentIDs: Set<String>) {
+        let prefix = "\(category.rawValue):"
+
+        var approvals = store
+        let orphanedApprovals = approvals.filter { entry in
+            entry.hasPrefix(prefix) && !currentIDs.contains(String(entry.dropFirst(prefix.count)))
+        }
+        if !orphanedApprovals.isEmpty {
+            approvals.subtract(orphanedApprovals)
+            save(approvals)
+            for entry in orphanedApprovals {
+                let itemID = String(entry.dropFirst(prefix.count))
+                DatabaseManager.shared.insertApprovalEvent(
+                    category: category.rawValue, itemID: itemID, action: "approval_pruned"
+                )
+            }
+        }
+
+        var quarantines = quarantineStore
+        let orphanedQuarantines = quarantines.filter { entry in
+            entry.hasPrefix(prefix) && !currentIDs.contains(String(entry.dropFirst(prefix.count)))
+        }
+        if !orphanedQuarantines.isEmpty {
+            quarantines.subtract(orphanedQuarantines)
+            saveQuarantine(quarantines)
+            for entry in orphanedQuarantines {
+                let itemID = String(entry.dropFirst(prefix.count))
+                DatabaseManager.shared.insertApprovalEvent(
+                    category: category.rawValue, itemID: itemID, action: "quarantine_pruned"
+                )
+            }
+        }
     }
 
     // MARK: - Migration

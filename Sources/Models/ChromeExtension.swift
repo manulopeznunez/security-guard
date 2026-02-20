@@ -47,8 +47,14 @@ struct ChromeExtensionEntry: Identifiable, Sendable {
         ApprovalManager.isApproved(.chromeExtension, id: extensionId)
     }
 
+    var isQuarantined: Bool {
+        ApprovalManager.isQuarantined(.chromeExtension, id: extensionId)
+    }
+
     var effectiveLabel: String {
-        if risk == .high && isApproved {
+        if risk == .high && isQuarantined {
+            return "High (Quarantined)"
+        } else if risk == .high && isApproved {
             return "High (Approved)"
         } else if risk == .high {
             return "High (Pending review)"
@@ -57,7 +63,9 @@ struct ChromeExtensionEntry: Identifiable, Sendable {
     }
 
     var effectiveColor: Color {
-        if risk == .high && isApproved {
+        if risk == .high && isQuarantined {
+            return .red
+        } else if risk == .high && isApproved {
             return .orange
         }
         return risk.color

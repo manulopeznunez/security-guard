@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PersistenceScannerView: View {
     @State private var viewModel = PersistenceScannerViewModel()
+    @State private var itemToQuarantine: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -135,7 +136,25 @@ struct PersistenceScannerView: View {
                         if item.needsReview {
                             HStack(spacing: 4) {
                                 let approved = ApprovalManager.isApproved(.persistence, id: item.executablePath)
-                                if approved {
+                                let quarantined = ApprovalManager.isQuarantined(.persistence, id: item.executablePath)
+                                if quarantined {
+                                    Label("Quarantined", systemImage: "exclamationmark.octagon.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .clipShape(Capsule())
+                                    Button {
+                                        ApprovalManager.unquarantine(.persistence, id: item.executablePath)
+                                        Task { await viewModel.scan() }
+                                    } label: {
+                                        Label("Remove", systemImage: "arrow.uturn.backward")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                } else if approved {
                                     Button {
                                         ApprovalManager.revoke(.persistence, id: item.executablePath)
                                         Task { await viewModel.scan() }
@@ -157,6 +176,15 @@ struct PersistenceScannerView: View {
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.mini)
                                     .tint(.green)
+                                    Button {
+                                        itemToQuarantine = item.executablePath
+                                    } label: {
+                                        Label("Quarantine", systemImage: "exclamationmark.octagon")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.red)
                                 }
 
                                 Button {
@@ -198,6 +226,23 @@ struct PersistenceScannerView: View {
                     .width(60)
                 }
             }
+        }
+        .alert("Quarantine this item?", isPresented: Binding<Bool>(
+            get: { itemToQuarantine != nil },
+            set: { if !$0 { itemToQuarantine = nil } }
+        )) {
+            Button("Quarantine", role: .destructive) {
+                if let id = itemToQuarantine {
+                    ApprovalManager.quarantine(.persistence, id: id)
+                    itemToQuarantine = nil
+                    Task { await viewModel.scan() }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                itemToQuarantine = nil
+            }
+        } message: {
+            Text("This will flag the item as quarantined. You can undo this later.")
         }
     }
 }

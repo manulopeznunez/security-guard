@@ -22,11 +22,15 @@ struct MacSecurityGuardApp: App {
     init() {
         AuditLogger.app.info("MacSecurityGuard launching")
         ApprovalManager.migrateOldChromeApprovals()
+        NotificationService.requestPermission()
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .task {
+                    NSApp.applicationIconImage = AppIcon.generate()
+                }
         }
         .defaultSize(width: 900, height: 600)
     }

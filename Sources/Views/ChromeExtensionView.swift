@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChromeExtensionView: View {
     @State private var viewModel = ChromeExtensionViewModel()
+    @State private var itemToQuarantine: String?
 
     private var highRisk: Int { viewModel.extensions.filter { $0.risk == .high }.count }
     private var pendingReview: Int { viewModel.extensions.filter { $0.risk == .high && !$0.isApproved }.count }
@@ -171,9 +172,27 @@ struct ChromeExtensionView: View {
                                 .clipShape(Capsule())
                                 .help("Chrome profile: \(ext.profile)")
 
-                            // Approve / Revoke button for high risk
+                            // Approve / Revoke / Quarantine button for high risk
                             if ext.risk == .high {
-                                if ext.isApproved {
+                                let quarantined = ApprovalManager.isQuarantined(.chromeExtension, id: ext.extensionId)
+                                if quarantined {
+                                    Label("Quarantined", systemImage: "exclamationmark.octagon.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .clipShape(Capsule())
+                                    Button {
+                                        ApprovalManager.unquarantine(.chromeExtension, id: ext.extensionId)
+                                        Task { await viewModel.scan() }
+                                    } label: {
+                                        Label("Remove", systemImage: "arrow.uturn.backward")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                } else if ext.isApproved {
                                     Button(action: {
                                         ApprovalManager.revoke(.chromeExtension, id: ext.extensionId)
                                         Task { await viewModel.scan() }
@@ -195,7 +214,25 @@ struct ChromeExtensionView: View {
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.mini)
                                     .tint(.green)
+                                    Button {
+                                        itemToQuarantine = ext.extensionId
+                                    } label: {
+                                        Label("Quarantine", systemImage: "exclamationmark.octagon")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.red)
                                 }
+
+                                Button {
+                                    UninstallHelper.investigateChromeExtensionWithClaude(ext: ext)
+                                } label: {
+                                    Image(systemName: "sparkle.magnifyingglass")
+                                        .foregroundStyle(.purple)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Investigate with Claude Code")
                             }
                         }
 
@@ -279,6 +316,23 @@ struct ChromeExtensionView: View {
         }
         .task {
             await viewModel.scan()
+        }
+        .alert("Quarantine this item?",
+               isPresented: Binding(
+                   get: { itemToQuarantine != nil },
+                   set: { if !$0 { itemToQuarantine = nil } }
+               )
+        ) {
+            Button("Cancel", role: .cancel) { itemToQuarantine = nil }
+            Button("Quarantine", role: .destructive) {
+                if let id = itemToQuarantine {
+                    ApprovalManager.quarantine(.chromeExtension, id: id)
+                    Task { await viewModel.scan() }
+                }
+                itemToQuarantine = nil
+            }
+        } message: {
+            Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
     }
 }

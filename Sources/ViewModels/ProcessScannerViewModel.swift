@@ -19,7 +19,7 @@ final class ProcessScannerViewModel {
 
         // Cache flagged items for Security Status
         let flagged = results.filter { $0.signatureValid == false }.map(\.path)
-        ApprovalManager.saveFlagged(.process, ids: flagged)
+        ApprovalManager.recordScanResults(.process, flaggedIDs: flagged)
     }
 
     nonisolated static func performScan(onProgress: @Sendable @escaping (String) -> Void) async -> [ProcessEntry] {

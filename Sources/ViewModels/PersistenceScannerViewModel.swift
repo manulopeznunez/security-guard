@@ -17,7 +17,7 @@ final class PersistenceScannerViewModel {
 
         // Cache flagged items for Security Status
         let flagged = results.filter(\.needsReview).map(\.executablePath)
-        ApprovalManager.saveFlagged(.persistence, ids: flagged)
+        ApprovalManager.recordScanResults(.persistence, flaggedIDs: flagged)
     }
 
     nonisolated static func performScan() async -> [PersistenceEntry] {

@@ -285,6 +285,55 @@ final class SecurityStatusViewModel {
             howToUse: "Go to the 'Extensions' tab to review each HIGH risk extension. Press 'Approve' once you verify it's legitimate."
         )
 
+        appendCachedCard(&results,
+            category: .networkMonitor,
+            name: "Network-Active Process Flags",
+            explanation: "Processes with active network connections that are unsigned, have no known parent, or show signs of dylib injection. These could indicate compromised or suspicious software communicating over the network.",
+            howToUse: "Go to 'Network History' > 'By App' tab. Click the info button on flagged processes (red icons). Review the process chain, injection risk, and trace. Press 'Mark as Reviewed' if you trust the process."
+        )
+
+        appendCachedCard(&results,
+            category: .homebrew,
+            name: "Homebrew Package Health",
+            explanation: "Outdated Homebrew packages may contain known security vulnerabilities. Critical tools like git, openssl, and curl should always be current.",
+            howToUse: "Go to the 'Homebrew' tab and scan. Outdated packages show an Approve button if you accept the risk, or use the update button to upgrade them."
+        )
+
+        appendCachedCard(&results,
+            category: .attackSurface,
+            name: "Attack Surface (Listening Ports)",
+            explanation: "Ports open for incoming connections represent your attack surface. Dangerous ports (SSH, VNC, SMB) or unsigned processes listening on any port need review.",
+            howToUse: "Go to the 'Surface' tab to see all listening ports, SSH key audit, and exposed services. Approve ports you expect to be open."
+        )
+
+        appendCachedCard(&results,
+            category: .tccPermission,
+            name: "TCC Permissions Audit",
+            explanation: "Apps with Full Disk Access, Accessibility, Camera, or Screen Recording. Non-Apple apps with dangerous permissions could be spyware.",
+            howToUse: "Go to 'Permissions' tab > 'TCC Permissions'. Review non-Apple apps with dangerous access."
+        )
+
+        appendCachedCard(&results,
+            category: .sudoConfig,
+            name: "Sudo Configuration",
+            explanation: "Sudo rules allowing root access. NOPASSWD entries allow passwordless root, dangerous with AI agents.",
+            howToUse: "Go to 'Permissions' > 'Sudo Config'. Review NOPASSWD entries and unexpected rules."
+        )
+
+        appendCachedCard(&results,
+            category: .usersGroups,
+            name: "Users & Groups Audit",
+            explanation: "Local accounts. Unexpected admin users or UID 0 accounts could indicate compromise.",
+            howToUse: "Go to 'Permissions' > 'Users & Groups'. Review admin users and check for unknowns."
+        )
+
+        appendCachedCard(&results,
+            category: .configGuard,
+            name: "Config File Integrity",
+            explanation: "Tracks dotfile changes (.zshrc, .gitconfig, .ssh/config). AI agents may modify these silently.",
+            howToUse: "Go to 'Config Guard' tab. Set a baseline, then review any changes after agent sessions."
+        )
+
         // Remote Login (SSH) — check if sshd is listening on port 22
         let ssh = ShellExecutor.shell("lsof -i :22 -n -P 2>/dev/null | grep LISTEN")
         let sshEnabled = !ssh.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -328,6 +377,7 @@ final class SecurityStatusViewModel {
 
         let flagged = ApprovalManager.flaggedIDs(for: category)
         let pending = ApprovalManager.pendingCount(for: category)
+        let quarantined = ApprovalManager.quarantinedCount(for: category)
 
         if flagged.isEmpty {
             // Scanned and nothing flagged — all clean
@@ -337,6 +387,26 @@ final class SecurityStatusViewModel {
                 howToUse: howToUse,
                 description: "Last scan: all clear",
                 status: .enabled,
+                action: .none,
+                category: .blindSpots
+            ))
+        } else if quarantined > 0 && pending > 0 {
+            results.append(SecurityItem(
+                name: name,
+                explanation: explanation,
+                howToUse: howToUse,
+                description: "\(pending) pending review, \(quarantined) quarantined",
+                status: .disabled,
+                action: .none,
+                category: .blindSpots
+            ))
+        } else if quarantined > 0 {
+            results.append(SecurityItem(
+                name: name,
+                explanation: explanation,
+                howToUse: howToUse,
+                description: "\(quarantined) quarantined, rest approved",
+                status: .disabled,
                 action: .none,
                 category: .blindSpots
             ))
@@ -372,22 +442,22 @@ final class SecurityStatusViewModel {
         // Run all scanners and cache results
         let processResults = await ProcessScannerViewModel.performScan(onProgress: { _ in })
         let flaggedProcesses = processResults.filter { $0.signatureValid == false }.map(\.path)
-        ApprovalManager.saveFlagged(.process, ids: flaggedProcesses)
+        ApprovalManager.recordScanResults(.process, flaggedIDs: flaggedProcesses)
 
         actionInProgress = "Scanning persistence..."
         let persistenceResults = await PersistenceScannerViewModel.performScan()
         let flaggedPersistence = persistenceResults.filter(\.needsReview).map(\.executablePath)
-        ApprovalManager.saveFlagged(.persistence, ids: flaggedPersistence)
+        ApprovalManager.recordScanResults(.persistence, flaggedIDs: flaggedPersistence)
 
         actionInProgress = "Scanning app signatures..."
         let appResults = await AppSignatureViewModel.performScan(onProgress: { _ in })
         let flaggedApps = appResults.filter { !$0.isValid }.map(\.appPath)
-        ApprovalManager.saveFlagged(.appSignature, ids: flaggedApps)
+        ApprovalManager.recordScanResults(.appSignature, flaggedIDs: flaggedApps)
 
         actionInProgress = "Scanning Chrome extensions..."
         let extResults = ChromeExtensionViewModel.performScan()
         let flaggedExts = extResults.filter { $0.risk == .high }.map(\.extensionId)
-        ApprovalManager.saveFlagged(.chromeExtension, ids: flaggedExts)
+        ApprovalManager.recordScanResults(.chromeExtension, flaggedIDs: flaggedExts)
 
         if FileManager.default.isExecutableFile(
             atPath: "/Applications/KnockKnock.app/Contents/MacOS/KnockKnock"
@@ -395,8 +465,37 @@ final class SecurityStatusViewModel {
             actionInProgress = "Running KnockKnock deep scan..."
             let kkResult = await KnockKnockViewModel.performScan()
             let flaggedKK = kkResult.flaggedItems.map(\.path)
-            ApprovalManager.saveFlagged(.knockknock, ids: flaggedKK)
+            ApprovalManager.recordScanResults(.knockknock, flaggedIDs: flaggedKK)
         }
+
+        if Self.brewPath() != nil {
+            actionInProgress = "Scanning Homebrew packages..."
+            let brewResult = await HomebrewScannerViewModel.performScan()
+            let flaggedBrew = brewResult.packages.filter(\.needsReview).map(\.approvalID)
+            ApprovalManager.recordScanResults(.homebrew, flaggedIDs: flaggedBrew)
+        }
+
+        actionInProgress = "Scanning TCC permissions..."
+        let tccResult = await PermissionsViewModel.performTCCScan()
+        if tccResult.fdaAvailable {
+            let flaggedTCC = tccResult.entries.filter(\.needsReview).map(\.approvalID)
+            ApprovalManager.recordScanResults(.tccPermission, flaggedIDs: flaggedTCC)
+        }
+
+        actionInProgress = "Scanning sudo configuration..."
+        let sudoResult = await PermissionsViewModel.performSudoScan()
+        let flaggedSudo = sudoResult.filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.sudoConfig, flaggedIDs: flaggedSudo)
+
+        actionInProgress = "Scanning users and groups..."
+        let usersResult = await PermissionsViewModel.performUsersScan()
+        let flaggedUsers = usersResult.users.filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.usersGroups, flaggedIDs: flaggedUsers)
+
+        actionInProgress = "Checking config file integrity..."
+        let configResult = await ConfigGuardViewModel.performScan()
+        let flaggedConfig = configResult.filter(\.needsReview).map(\.approvalID)
+        ApprovalManager.recordScanResults(.configGuard, flaggedIDs: flaggedConfig)
 
         actionInProgress = nil
         await refresh()
@@ -422,6 +521,7 @@ final class SecurityStatusViewModel {
 
         let flagged = ApprovalManager.flaggedIDs(for: .knockknock)
         let pending = ApprovalManager.pendingCount(for: .knockknock)
+        let quarantined = ApprovalManager.quarantinedCount(for: .knockknock)
 
         if flagged.isEmpty {
             results.append(SecurityItem(
@@ -430,6 +530,26 @@ final class SecurityStatusViewModel {
                 howToUse: "No action needed. All persistence items have valid signatures. Re-run periodically to check for changes.",
                 description: "Last scan: all clear — no unsigned or flagged items",
                 status: .enabled,
+                action: .none,
+                category: .recommended
+            ))
+        } else if quarantined > 0 && pending > 0 {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan found items needing attention. Some are quarantined as dangerous.",
+                howToUse: "Go to the KnockKnock tab and review flagged items. Approve items you recognize.",
+                description: "\(pending) pending review, \(quarantined) quarantined",
+                status: .disabled,
+                action: .none,
+                category: .recommended
+            ))
+        } else if quarantined > 0 {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan found quarantined items. These were flagged as dangerous.",
+                howToUse: "Go to the KnockKnock tab to review quarantined items. They will trigger alerts if they reappear.",
+                description: "\(quarantined) quarantined, rest approved",
+                status: .disabled,
                 action: .none,
                 category: .recommended
             ))
@@ -455,4 +575,7 @@ final class SecurityStatusViewModel {
             ))
         }
     }
+
+    // MARK: - Quarantine reappearance alerts
+
 }

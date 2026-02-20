@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProcessScannerView: View {
     @State private var viewModel = ProcessScannerViewModel()
+    @State private var itemToQuarantine: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -158,7 +159,25 @@ struct ProcessScannerView: View {
                         HStack(spacing: 4) {
                             if p.signatureValid == false {
                                 let approved = ApprovalManager.isApproved(.process, id: p.path)
-                                if approved {
+                                let quarantined = ApprovalManager.isQuarantined(.process, id: p.path)
+                                if quarantined {
+                                    Label("Quarantined", systemImage: "exclamationmark.octagon.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .clipShape(Capsule())
+                                    Button {
+                                        ApprovalManager.unquarantine(.process, id: p.path)
+                                        Task { await viewModel.scan() }
+                                    } label: {
+                                        Label("Remove", systemImage: "arrow.uturn.backward")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                } else if approved {
                                     Button {
                                         ApprovalManager.revoke(.process, id: p.path)
                                         Task { await viewModel.scan() }
@@ -180,7 +199,27 @@ struct ProcessScannerView: View {
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.mini)
                                     .tint(.green)
+                                    Button {
+                                        itemToQuarantine = p.path
+                                    } label: {
+                                        Label("Quarantine", systemImage: "exclamationmark.octagon")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.red)
                                 }
+                            }
+
+                            if p.signatureValid == false {
+                                Button {
+                                    UninstallHelper.investigateProcessWithClaude(process: p)
+                                } label: {
+                                    Image(systemName: "sparkle.magnifyingglass")
+                                        .foregroundStyle(.purple)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Investigate with Claude Code")
                             }
 
                             if let appPath = p.parentAppPath, let appName = p.parentAppName {
@@ -198,6 +237,23 @@ struct ProcessScannerView: View {
                     .width(min: 100)
                 }
             }
+        }
+        .alert("Quarantine this item?",
+               isPresented: Binding(
+                   get: { itemToQuarantine != nil },
+                   set: { if !$0 { itemToQuarantine = nil } }
+               )
+        ) {
+            Button("Cancel", role: .cancel) { itemToQuarantine = nil }
+            Button("Quarantine", role: .destructive) {
+                if let id = itemToQuarantine {
+                    ApprovalManager.quarantine(.process, id: id)
+                    Task { await viewModel.scan() }
+                }
+                itemToQuarantine = nil
+            }
+        } message: {
+            Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
     }
 }

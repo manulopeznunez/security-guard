@@ -1,9 +1,13 @@
 import SwiftUI
+import AppKit
 
 struct NetworkHistoryView: View {
     @State private var viewModel = NetworkHistoryViewModel()
     @State private var monitor = BackgroundMonitor.shared
     @State private var selectedTab = 0
+    @State private var selectedApp: AppSummary?
+    @State private var approvalVersion = 0  // Increment to refresh approval state
+    @State private var appToQuarantine: AppSummary?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -83,6 +87,9 @@ struct NetworkHistoryView: View {
 
             Divider()
 
+            // Suspicious items banner
+            suspiciousBanner
+
             if viewModel.totalRecords == 0 && !viewModel.isLoading {
                 VStack(spacing: 12) {
                     Spacer()
@@ -121,6 +128,23 @@ struct NetworkHistoryView: View {
         }
         .task {
             await viewModel.refresh()
+        }
+        .alert("Quarantine this item?",
+               isPresented: Binding(
+                   get: { appToQuarantine != nil },
+                   set: { if !$0 { appToQuarantine = nil } }
+               )
+        ) {
+            Button("Cancel", role: .cancel) { appToQuarantine = nil }
+            Button("Quarantine", role: .destructive) {
+                if let app = appToQuarantine {
+                    ApprovalManager.quarantine(.networkMonitor, id: approvalKey(for: app))
+                    approvalVersion += 1
+                }
+                appToQuarantine = nil
+            }
+        } message: {
+            Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
     }
 
@@ -206,7 +230,17 @@ struct NetworkHistoryView: View {
         Table(viewModel.topApps) {
             TableColumn("App") { app in
                 HStack(spacing: 6) {
-                    if app.signatureAuthority.isEmpty {
+                    if isFlagged(app) && isApproved(app) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.blue)
+                            .font(.caption)
+                            .help("Reviewed and approved")
+                    } else if !app.injectionRisk.isEmpty {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help(app.injectionRisk)
+                    } else if app.signatureAuthority.isEmpty && app.parentSignature.isEmpty {
                         Image(systemName: "app.fill")
                             .foregroundStyle(.secondary)
                             .font(.caption)
@@ -229,21 +263,32 @@ struct NetworkHistoryView: View {
 
             TableColumn("Signature") { app in
                 let cleanName = FormatUtils.cleanAuthority(app.signatureAuthority)
-                if app.signatureAuthority.isEmpty {
-                    Text("...")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else if app.isSigned {
+                if !app.signatureAuthority.isEmpty && app.isSigned {
                     Text(cleanName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .help(app.signatureAuthority)
-                } else {
+                } else if !app.signatureAuthority.isEmpty {
                     Text(cleanName.isEmpty ? "Unsigned" : cleanName)
                         .font(.caption.bold())
                         .foregroundStyle(.red)
                         .lineLimit(1)
+                } else if !app.parentSignature.isEmpty {
+                    HStack(spacing: 3) {
+                        Image(systemName: "link")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text("via \(app.parentName) (\(FormatUtils.cleanAuthority(app.parentSignature)))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .help("Parent process: \(app.parentName) signed by \(app.parentSignature)")
+                } else {
+                    Text("...")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
             .width(min: 150)
@@ -280,11 +325,503 @@ struct NetworkHistoryView: View {
             }
             .width(80)
 
-            TableColumn("Total") { app in
-                Text(FormatUtils.bytes(app.totalBytesIn + app.totalBytesOut))
-                    .font(.callout.bold())
+            TableColumn("") { app in
+                Button(action: { selectedApp = app }) {
+                    Image(systemName: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+                .help("See details")
+                .popover(isPresented: Binding(
+                    get: { selectedApp?.id == app.id },
+                    set: { if !$0 { selectedApp = nil } }
+                ), arrowEdge: .leading) {
+                    appDetailPopover(app: app)
+                }
             }
-            .width(80)
+            .width(30)
+        }
+    }
+
+    // MARK: - App Detail Popover
+
+    private func appDetailPopover(app: AppSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Header
+            HStack(spacing: 6) {
+                if app.isSigned {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                } else if !app.injectionRisk.isEmpty {
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .foregroundStyle(.red)
+                } else {
+                    Image(systemName: "app.fill")
+                        .foregroundStyle(.secondary)
+                }
+                Text(app.processName)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+
+            if app.isSigned {
+                Text("Signed by \(FormatUtils.cleanAuthority(app.signatureAuthority))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Unsigned process")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            Divider()
+
+            // Process Chain
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Process Chain")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                if app.parentChain.isEmpty {
+                    Text("No parent chain available")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    let hops = app.parentChain.components(separatedBy: " \u{2192} ")
+                    ForEach(Array(hops.enumerated()), id: \.offset) { index, hop in
+                        HStack(spacing: 4) {
+                            if index > 0 {
+                                Text(String(repeating: "  ", count: index) + "\u{2192}")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(hop)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(index == hops.count - 1 ? .primary : .secondary)
+                        }
+                    }
+                }
+            }
+
+            // Injection Risk
+            if !app.injectionRisk.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                        Text("Injection Risk")
+                            .font(.caption.bold())
+                            .foregroundStyle(.red)
+                    }
+                    Text(app.injectionRisk)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.red.opacity(0.8))
+                }
+            }
+
+            Divider()
+
+            // Network Activity
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Network Activity")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Label("\(app.timesSeen) connections", systemImage: "network")
+                    Label("\(app.uniqueIPs) IPs", systemImage: "globe")
+                    Label("\(app.uniqueCountries) countries", systemImage: "flag")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.down")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                        Text(FormatUtils.bytes(app.totalBytesIn))
+                            .font(.caption)
+                    }
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.up")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                        Text(FormatUtils.bytes(app.totalBytesOut))
+                            .font(.caption)
+                    }
+                }
+            }
+
+            // Full Process Trace (scrollable)
+            if !app.processTrace.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Full Trace")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+
+                    ScrollView {
+                        Text(app.processTrace)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 150)
+                }
+            }
+
+            Divider()
+
+            // Action buttons
+            HStack(spacing: 8) {
+                Button(action: { copyTrace(app: app) }) {
+                    Label("Copy Full Trace", systemImage: "doc.on.doc")
+                }
+                .controlSize(.small)
+
+                Button(action: { investigateWithClaude(app: app) }) {
+                    Label("Ask Claude Code", systemImage: "magnifyingglass")
+                }
+                .controlSize(.small)
+                .tint(.blue)
+            }
+
+            // Process path (when available)
+            if !app.processPath.isEmpty {
+                Divider()
+                HStack(spacing: 4) {
+                    Image(systemName: "terminal")
+                        .foregroundStyle(.secondary)
+                        .font(.caption2)
+                    Text(app.processPath)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            // Approval / Quarantine (only for flagged items)
+            if isFlagged(app) {
+                Divider()
+                let quarantined = isQuarantined(app)
+                let approved = isApproved(app)
+                HStack(spacing: 8) {
+                    if quarantined {
+                        Image(systemName: "exclamationmark.octagon.fill")
+                            .foregroundStyle(.red)
+                        Text("Quarantined — flagged as dangerous")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Spacer()
+                        Button("Remove Quarantine") {
+                            ApprovalManager.unquarantine(.networkMonitor, id: approvalKey(for: app))
+                            approvalVersion += 1
+                        }
+                        .controlSize(.small)
+                    } else if approved {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.blue)
+                        Text("Reviewed and approved")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Revoke") {
+                            revokeAll(for: app)
+                        }
+                        .controlSize(.small)
+                        .tint(.red)
+                    } else {
+                        Image(systemName: "shield.lefthalf.filled")
+                            .foregroundStyle(.orange)
+                        Text("Flagged — review recommended")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("Mark as Reviewed") {
+                            ApprovalManager.approve(.networkMonitor, id: approvalKey(for: app))
+                            approvalVersion += 1
+                        }
+                        .controlSize(.small)
+                        .tint(.blue)
+                        Button("Quarantine") {
+                            appToQuarantine = app
+                        }
+                        .controlSize(.small)
+                        .tint(.red)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 420)
+    }
+
+    private func copyTrace(app: AppSummary) {
+        let signedStatus = app.isSigned ? "Yes (\(FormatUtils.cleanAuthority(app.signatureAuthority)))" : "No"
+        var text = """
+        Process: \(app.processName)
+        Signed: \(signedStatus)
+        Parent chain: \(app.parentChain.isEmpty ? "Unknown" : app.parentChain)
+        Injection risk: \(app.injectionRisk.isEmpty ? "None" : app.injectionRisk)
+        Network: \(app.timesSeen) connections, \(app.uniqueIPs) IPs, \(app.uniqueCountries) countries
+        Data: \(FormatUtils.bytes(app.totalBytesIn)) received, \(FormatUtils.bytes(app.totalBytesOut)) sent
+        """
+        if !app.processTrace.isEmpty {
+            text += "\n\n" + app.processTrace
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func investigateWithClaude(app: AppSummary) {
+        let traceSection = app.processTrace.isEmpty ? "Not available" : app.processTrace
+        let prompt = """
+        Investigate this network-active process and assess its security risk.
+
+        PROCESS DETAILS:
+        - Name: \(app.processName)
+        - Signature: \(app.signatureAuthority.isEmpty ? "NONE" : app.signatureAuthority)
+        - Parent chain: \(app.parentChain.isEmpty ? "Unknown" : app.parentChain)
+        - Injection risk: \(app.injectionRisk.isEmpty ? "None detected" : app.injectionRisk)
+        - Network activity: \(app.timesSeen) connections, \(app.uniqueIPs) unique IPs, \(app.uniqueCountries) countries
+        - Data transferred: \(FormatUtils.bytes(app.totalBytesIn)) received, \(FormatUtils.bytes(app.totalBytesOut)) sent
+
+        FULL PROCESS TRACE:
+        \(traceSection)
+
+        INVESTIGATION STEPS:
+        1. Identify what this process is and what app it belongs to
+        2. Analyze the codesign details and parent chain
+        3. Check the open connections and files for anything suspicious
+        4. Check if the network activity volume/pattern is normal
+        5. If injection risk detected, investigate the flagged dylibs
+        6. Search the web for any known security issues with this process
+
+        RESPONSE FORMAT:
+        - VERDICT: SAFE / SUSPICIOUS / INVESTIGATE FURTHER
+        - WHAT IS IT: Brief explanation
+        - PARENT CHAIN ANALYSIS: Is this chain expected?
+        - NETWORK ASSESSMENT: Is the traffic volume/pattern normal?
+        - OPEN FILES ASSESSMENT: Anything suspicious in the open files?
+        - RECOMMENDED ACTION: Specific steps to take
+        """
+        UninstallHelper.launchClaude(with: prompt)
+        selectedApp = nil
+    }
+
+    // MARK: - Approval & Quarantine Helpers
+
+    /// Build an approval key using the full process path when available.
+    /// Falls back to process name for legacy data without paths.
+    private func approvalKey(for app: AppSummary) -> String {
+        let identifier = app.processPath.isEmpty ? app.processName : app.processPath
+        if app.injectionRisk.isEmpty {
+            return identifier
+        }
+        return "\(identifier)|\(app.injectionRisk)"
+    }
+
+    /// Legacy key using only the process name (for backward compatibility).
+    private func legacyKey(for app: AppSummary) -> String {
+        if app.injectionRisk.isEmpty {
+            return app.processName
+        }
+        return "\(app.processName)|\(app.injectionRisk)"
+    }
+
+    private func isApproved(_ app: AppSummary) -> Bool {
+        let _ = approvalVersion
+        let key = approvalKey(for: app)
+        if ApprovalManager.isApproved(.networkMonitor, id: key) { return true }
+        // Legacy fallback: check by name only
+        let legacy = legacyKey(for: app)
+        if legacy != key { return ApprovalManager.isApproved(.networkMonitor, id: legacy) }
+        return false
+    }
+
+    private func isQuarantined(_ app: AppSummary) -> Bool {
+        let _ = approvalVersion
+        let key = approvalKey(for: app)
+        if ApprovalManager.isQuarantined(.networkMonitor, id: key) { return true }
+        let legacy = legacyKey(for: app)
+        if legacy != key { return ApprovalManager.isQuarantined(.networkMonitor, id: legacy) }
+        return false
+    }
+
+    private func isFlagged(_ app: AppSummary) -> Bool {
+        !app.injectionRisk.isEmpty || (!app.isSigned && app.signatureAuthority.isEmpty && app.parentSignature.isEmpty)
+    }
+
+    /// Revoke both current and legacy keys for complete cleanup.
+    private func revokeAll(for app: AppSummary) {
+        ApprovalManager.revoke(.networkMonitor, id: approvalKey(for: app))
+        let legacy = legacyKey(for: app)
+        if legacy != approvalKey(for: app) {
+            ApprovalManager.revoke(.networkMonitor, id: legacy)
+        }
+        approvalVersion += 1
+    }
+
+    // MARK: - Suspicious & Quarantine Banners
+
+    private var unreviewedApps: [AppSummary] {
+        let _ = approvalVersion
+        return viewModel.topApps.filter { isFlagged($0) && !isApproved($0) && !isQuarantined($0) }
+    }
+
+    private var quarantinedApps: [AppSummary] {
+        let _ = approvalVersion
+        return viewModel.topApps.filter { isQuarantined($0) }
+    }
+
+    @ViewBuilder
+    private var suspiciousBanner: some View {
+        // Quarantine banner (red, separate, on top)
+        let quarantined = quarantinedApps
+        if !quarantined.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(.red)
+                    Text("\(quarantined.count) quarantined app\(quarantined.count == 1 ? "" : "s") active")
+                        .font(.callout.bold())
+                        .foregroundStyle(.primary)
+                    Spacer()
+                }
+
+                ForEach(quarantined) { app in
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.octagon.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(app.processName)
+                                .font(.caption.bold())
+                            Text("Quarantined — flagged as dangerous")
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                        }
+
+                        Spacer()
+
+                        Text("\(app.timesSeen) conn, \(app.uniqueIPs) IPs")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+
+                        Button("Ask Claude") {
+                            investigateWithClaude(app: app)
+                        }
+                        .controlSize(.mini)
+                        .buttonStyle(.bordered)
+
+                        Button("Remove") {
+                            ApprovalManager.unquarantine(.networkMonitor, id: approvalKey(for: app))
+                            approvalVersion += 1
+                        }
+                        .controlSize(.mini)
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.red.opacity(0.08))
+                    .strokeBorder(.red.opacity(0.3), lineWidth: 1)
+            )
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+        }
+
+        // Suspicious banner (orange, existing pattern)
+        let suspicious = unreviewedApps
+        if !suspicious.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("\(suspicious.count) suspicious app\(suspicious.count == 1 ? "" : "s") need\(suspicious.count == 1 ? "s" : "") review")
+                        .font(.callout.bold())
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if selectedTab != 1 {
+                        Button("Show in Apps tab") {
+                            selectedTab = 1
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                ForEach(suspicious) { app in
+                    HStack(spacing: 8) {
+                        if !app.injectionRisk.isEmpty {
+                            Image(systemName: "exclamationmark.shield.fill")
+                                .foregroundStyle(.red)
+                                .font(.caption)
+                        } else {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                                .font(.caption)
+                        }
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(app.processName)
+                                .font(.caption.bold())
+                            Text(!app.injectionRisk.isEmpty ? "Injection risk detected" : "Unsigned process")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Text("\(app.timesSeen) conn, \(app.uniqueIPs) IPs")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+
+                        Button("Ask Claude") {
+                            investigateWithClaude(app: app)
+                        }
+                        .controlSize(.mini)
+                        .buttonStyle(.bordered)
+
+                        Button("Mark Reviewed") {
+                            ApprovalManager.approve(.networkMonitor, id: approvalKey(for: app))
+                            approvalVersion += 1
+                        }
+                        .controlSize(.mini)
+                        .buttonStyle(.bordered)
+                        .tint(.blue)
+
+                        Button("Quarantine") {
+                            appToQuarantine = app
+                        }
+                        .controlSize(.mini)
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.orange.opacity(0.08))
+                    .strokeBorder(.orange.opacity(0.3), lineWidth: 1)
+            )
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+        }
+
+        if !quarantined.isEmpty || !suspicious.isEmpty {
+            Divider()
         }
     }
 

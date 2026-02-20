@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AppSignatureView: View {
     @State private var viewModel = AppSignatureViewModel()
+    @State private var itemToQuarantine: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -63,7 +64,25 @@ struct AppSignatureView: View {
                         if !app.isValid {
                             HStack(spacing: 4) {
                                 let approved = ApprovalManager.isApproved(.appSignature, id: app.appPath)
-                                if approved {
+                                let quarantined = ApprovalManager.isQuarantined(.appSignature, id: app.appPath)
+                                if quarantined {
+                                    Label("Quarantined", systemImage: "exclamationmark.octagon.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .clipShape(Capsule())
+                                    Button {
+                                        ApprovalManager.unquarantine(.appSignature, id: app.appPath)
+                                        Task { await viewModel.scan() }
+                                    } label: {
+                                        Label("Remove", systemImage: "arrow.uturn.backward")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                } else if approved {
                                     Button {
                                         ApprovalManager.revoke(.appSignature, id: app.appPath)
                                         Task { await viewModel.scan() }
@@ -85,6 +104,15 @@ struct AppSignatureView: View {
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.mini)
                                     .tint(.green)
+                                    Button {
+                                        itemToQuarantine = app.appPath
+                                    } label: {
+                                        Label("Quarantine", systemImage: "exclamationmark.octagon")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.red)
                                 }
 
                                 Button {
@@ -113,6 +141,23 @@ struct AppSignatureView: View {
                     .width(30)
                 }
             }
+        }
+        .alert("Quarantine this item?",
+               isPresented: Binding(
+                   get: { itemToQuarantine != nil },
+                   set: { if !$0 { itemToQuarantine = nil } }
+               )
+        ) {
+            Button("Cancel", role: .cancel) { itemToQuarantine = nil }
+            Button("Quarantine", role: .destructive) {
+                if let id = itemToQuarantine {
+                    ApprovalManager.quarantine(.appSignature, id: id)
+                    Task { await viewModel.scan() }
+                }
+                itemToQuarantine = nil
+            }
+        } message: {
+            Text("This will mark the item as dangerous. You will be alerted if it reappears.")
         }
     }
 }

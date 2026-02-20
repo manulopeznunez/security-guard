@@ -47,7 +47,8 @@ final class DatabaseManager: Sendable {
             organization TEXT DEFAULT '',
             bytes_in INTEGER DEFAULT 0,
             bytes_out INTEGER DEFAULT 0,
-            hostname TEXT DEFAULT ''
+            hostname TEXT DEFAULT '',
+            process_path TEXT DEFAULT ''
         );
         """
 
@@ -66,6 +67,27 @@ final class DatabaseManager: Sendable {
         execute(db: db, sql: "ALTER TABLE connections ADD COLUMN hostname TEXT DEFAULT '';")
         // ^ silently fails if column already exists — that's fine
 
+        // Migration: parent process tracking columns
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN parent_name TEXT DEFAULT '';")
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN parent_path TEXT DEFAULT '';")
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN parent_signature TEXT DEFAULT '';")
+
+        // Migration: dylib injection risk column
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN injection_risk TEXT DEFAULT '';")
+
+        // Migration: full parent process chain
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN parent_chain TEXT DEFAULT '';")
+
+        // Migration: comprehensive process trace
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN process_trace TEXT DEFAULT '';")
+
+        // Migration: full executable path for process identification
+        execute(db: db, sql: "ALTER TABLE connections ADD COLUMN process_path TEXT DEFAULT '';")
+
+        // Migration: clear false-positive injection_risk data from vmmap-based detection.
+        // System dylibs (/usr/lib/, /System/) are SSV-protected but were incorrectly flagged.
+        execute(db: db, sql: "UPDATE connections SET injection_risk = '' WHERE injection_risk LIKE '%/usr/lib/%' OR injection_risk LIKE '%/System/%' OR injection_risk LIKE '%SM=COW%';")
+
         // Security scores history
         let createScoresSQL = """
         CREATE TABLE IF NOT EXISTS security_scores (
@@ -81,6 +103,41 @@ final class DatabaseManager: Sendable {
         for sql in createScoresSQL.components(separatedBy: ";") where !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             execute(db: db, sql: sql)
         }
+
+        // Listening ports history (attack surface monitoring)
+        let createListeningSQL = """
+        CREATE TABLE IF NOT EXISTS listening_ports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            process_name TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            local_port TEXT NOT NULL,
+            local_address TEXT DEFAULT '',
+            process_path TEXT DEFAULT '',
+            parent_signature TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_listening_timestamp ON listening_ports(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_listening_port ON listening_ports(local_port);
+        """
+        for sql in createListeningSQL.components(separatedBy: ";") where !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            execute(db: db, sql: sql)
+        }
+
+        // Approval audit trail
+        let createApprovalHistorySQL = """
+        CREATE TABLE IF NOT EXISTS approval_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            category TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            action TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_history_timestamp ON approval_history(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_approval_history_category ON approval_history(category);
+        """
+        for sql in createApprovalHistorySQL.components(separatedBy: ";") where !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            execute(db: db, sql: sql)
+        }
     }
 
     // MARK: - Insert
@@ -91,8 +148,8 @@ final class DatabaseManager: Sendable {
         defer { close(db) }
 
         let sql = """
-        INSERT INTO connections (process_name, pid, remote_ip, remote_port, country, country_code, organization, bytes_in, bytes_out, hostname)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO connections (process_name, pid, remote_ip, remote_port, country, country_code, organization, bytes_in, bytes_out, hostname, parent_name, parent_path, parent_signature, injection_risk, parent_chain, process_trace, process_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
         // Use a transaction for performance
@@ -115,6 +172,13 @@ final class DatabaseManager: Sendable {
             sqlite3_bind_int64(stmt, 8, Int64(conn.bytesIn))
             sqlite3_bind_int64(stmt, 9, Int64(conn.bytesOut))
             sqlite3_bind_text(stmt, 10, (conn.hostname as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 11, (conn.parentName as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 12, (conn.parentPath as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 13, (conn.parentSignature as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 14, (conn.injectionRisk as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 15, (conn.parentChain as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 16, (conn.processTrace as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 17, (conn.processPath as NSString).utf8String, -1, nil)
             sqlite3_step(stmt)
             sqlite3_reset(stmt)
         }
@@ -185,7 +249,13 @@ final class DatabaseManager: Sendable {
                COUNT(DISTINCT remote_ip) as unique_ips,
                COUNT(DISTINCT country) as unique_countries,
                SUM(bytes_in) as total_in,
-               SUM(bytes_out) as total_out
+               SUM(bytes_out) as total_out,
+               MAX(parent_name) as parent_name,
+               MAX(parent_signature) as parent_signature,
+               MAX(injection_risk) as injection_risk,
+               MAX(parent_chain) as parent_chain,
+               MAX(process_trace) as process_trace,
+               MAX(process_path) as process_path
         FROM connections
         WHERE timestamp >= datetime('now', 'localtime', ?1)
         GROUP BY process_name
@@ -207,7 +277,13 @@ final class DatabaseManager: Sendable {
                 uniqueIPs: Int(sqlite3_column_int(stmt, 2)),
                 uniqueCountries: Int(sqlite3_column_int(stmt, 3)),
                 totalBytesIn: Int64(sqlite3_column_int64(stmt, 4)),
-                totalBytesOut: Int64(sqlite3_column_int64(stmt, 5))
+                totalBytesOut: Int64(sqlite3_column_int64(stmt, 5)),
+                parentName: sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? "",
+                parentSignature: sqlite3_column_text(stmt, 7).map { String(cString: $0) } ?? "",
+                injectionRisk: sqlite3_column_text(stmt, 8).map { String(cString: $0) } ?? "",
+                parentChain: sqlite3_column_text(stmt, 9).map { String(cString: $0) } ?? "",
+                processTrace: sqlite3_column_text(stmt, 10).map { String(cString: $0) } ?? "",
+                processPath: sqlite3_column_text(stmt, 11).map { String(cString: $0) } ?? ""
             ))
         }
         sqlite3_finalize(stmt)
@@ -329,6 +405,194 @@ final class DatabaseManager: Sendable {
         execute(db: db, sql: "VACUUM;")
     }
 
+    // MARK: - Listening Ports
+
+    func insertListeningPorts(_ ports: [ListeningPortSnapshot]) {
+        guard !ports.isEmpty else { return }
+        AuditLogger.database.info("Inserting \(ports.count) listening port snapshots")
+        let db = open()
+        defer { close(db) }
+
+        let sql = """
+        INSERT INTO listening_ports (process_name, pid, local_port, local_address, process_path, parent_signature)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """
+
+        execute(db: db, sql: "BEGIN TRANSACTION;")
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            execute(db: db, sql: "ROLLBACK;")
+            return
+        }
+
+        for port in ports {
+            sqlite3_bind_text(stmt, 1, (port.processName as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(stmt, 2, Int32(port.pid))
+            sqlite3_bind_text(stmt, 3, (port.localPort as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 4, (port.localAddress as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 5, (port.processPath as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 6, (port.parentSignature as NSString).utf8String, -1, nil)
+            sqlite3_step(stmt)
+            sqlite3_reset(stmt)
+        }
+
+        sqlite3_finalize(stmt)
+        execute(db: db, sql: "COMMIT;")
+    }
+
+    /// Top listening ports by frequency in the last N days, grouped by port+process.
+    func topListeningPorts(days: Int, limit: Int = 50) -> [ListeningPortSummary] {
+        let db = open()
+        defer { close(db) }
+
+        let sql = """
+        SELECT local_port, local_address, process_name, process_path, parent_signature,
+               MIN(timestamp) as first_seen,
+               MAX(timestamp) as last_seen,
+               COUNT(*) as times_seen
+        FROM listening_ports
+        WHERE timestamp >= datetime('now', 'localtime', ?1)
+        GROUP BY local_port, process_name
+        ORDER BY times_seen DESC
+        LIMIT ?2;
+        """
+
+        var results: [ListeningPortSummary] = []
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        let daysParam = "-\(days) days"
+        sqlite3_bind_text(stmt, 1, (daysParam as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let port = String(cString: sqlite3_column_text(stmt, 0))
+            let address = String(cString: sqlite3_column_text(stmt, 1))
+            let process = String(cString: sqlite3_column_text(stmt, 2))
+            let path = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
+            let signature = sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? ""
+            let firstSeen = String(cString: sqlite3_column_text(stmt, 5))
+            let lastSeen = String(cString: sqlite3_column_text(stmt, 6))
+            let timesSeen = Int(sqlite3_column_int(stmt, 7))
+
+            let (risk, reason) = Self.classifyPortRisk(port: port, processName: process, signature: signature)
+
+            results.append(ListeningPortSummary(
+                localPort: port,
+                localAddress: address,
+                processName: process,
+                processPath: path,
+                parentSignature: signature,
+                firstSeen: firstSeen,
+                lastSeen: lastSeen,
+                timesSeen: timesSeen,
+                isCurrentlyOpen: false,
+                risk: risk,
+                riskReason: reason
+            ))
+        }
+        sqlite3_finalize(stmt)
+        return results
+    }
+
+    /// Purge old listening port records.
+    func purgeOldListeningPorts(days: Int) {
+        AuditLogger.database.info("Purging listening port records older than \(days) days")
+        let db = open()
+        defer { close(db) }
+
+        let sql = "DELETE FROM listening_ports WHERE timestamp < datetime('now', 'localtime', ?1);"
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            let daysParam = "-\(days) days"
+            sqlite3_bind_text(stmt, 1, (daysParam as NSString).utf8String, -1, nil)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    // MARK: - Approval Audit Trail
+
+    func insertApprovalEvent(category: String, itemID: String, action: String) {
+        let db = open()
+        defer { close(db) }
+
+        let sql = "INSERT INTO approval_history (category, item_id, action) VALUES (?, ?, ?);"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        sqlite3_bind_text(stmt, 1, (category as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 2, (itemID as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 3, (action as NSString).utf8String, -1, nil)
+        sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+    }
+
+    func approvalHistory(days: Int = 30, category: String? = nil) -> [ApprovalEvent] {
+        let db = open()
+        defer { close(db) }
+
+        let sql: String
+        if category != nil {
+            sql = """
+            SELECT timestamp, category, item_id, action
+            FROM approval_history
+            WHERE timestamp >= datetime('now', 'localtime', ?1)
+              AND category = ?2
+            ORDER BY timestamp DESC
+            LIMIT 500;
+            """
+        } else {
+            sql = """
+            SELECT timestamp, category, item_id, action
+            FROM approval_history
+            WHERE timestamp >= datetime('now', 'localtime', ?1)
+            ORDER BY timestamp DESC
+            LIMIT 500;
+            """
+        }
+
+        var results: [ApprovalEvent] = []
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        let daysParam = "-\(days) days"
+        sqlite3_bind_text(stmt, 1, (daysParam as NSString).utf8String, -1, nil)
+        if let category {
+            sqlite3_bind_text(stmt, 2, (category as NSString).utf8String, -1, nil)
+        }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(ApprovalEvent(
+                timestamp: String(cString: sqlite3_column_text(stmt, 0)),
+                category: String(cString: sqlite3_column_text(stmt, 1)),
+                itemID: String(cString: sqlite3_column_text(stmt, 2)),
+                action: String(cString: sqlite3_column_text(stmt, 3))
+            ))
+        }
+        sqlite3_finalize(stmt)
+        return results
+    }
+
+    // MARK: - Port Risk Classification
+
+    private static let dangerousPorts: Set<String> = ["22", "5900", "5988", "3283", "548", "445"]
+    private static let devPorts: Set<String> = [
+        "3000", "3001", "4200", "5000", "5173", "5432", "3306", "6379", "27017",
+        "8080", "8443", "8000", "8888", "9090", "9200", "11211", "15672", "2375"
+    ]
+
+    static func classifyPortRisk(port: String, processName: String, signature: String) -> (PortRisk, String) {
+        if dangerousPorts.contains(port) {
+            return (.dangerous, "High-risk service port (\(port))")
+        }
+        if signature.isEmpty || signature == "unsigned" {
+            return (.dangerous, "Unsigned process listening on port \(port)")
+        }
+        if devPorts.contains(port) {
+            return (.warning, "Development/database port (\(port))")
+        }
+        return (.safe, "Signed process on standard port")
+    }
+
     // MARK: - Security Scores
 
     func insertScore(enabled: Int, total: Int, details: String) {
@@ -442,6 +706,13 @@ struct ConnectionSnapshot: Sendable {
     let bytesIn: Int64
     let bytesOut: Int64
     let hostname: String
+    let parentName: String
+    let parentPath: String
+    let parentSignature: String
+    let injectionRisk: String
+    let parentChain: String
+    let processTrace: String
+    let processPath: String
 }
 
 struct IPSummary: Identifiable, Sendable {
@@ -470,6 +741,12 @@ struct AppSummary: Identifiable, Sendable {
     let totalBytesOut: Int64
     var isSigned: Bool = false
     var signatureAuthority: String = ""
+    var parentName: String = ""
+    var parentSignature: String = ""
+    var injectionRisk: String = ""
+    var parentChain: String = ""
+    var processTrace: String = ""
+    var processPath: String = ""
 }
 
 struct ConnectionRecord: Identifiable, Sendable {
@@ -500,4 +777,12 @@ struct ScoreSnapshot: Identifiable, Sendable {
     let totalCount: Int
     let score: Double
     let details: String
+}
+
+struct ApprovalEvent: Identifiable, Sendable {
+    let id = UUID()
+    let timestamp: String
+    let category: String
+    let itemID: String
+    let action: String
 }

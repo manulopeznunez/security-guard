@@ -19,7 +19,7 @@ final class AppSignatureViewModel {
 
         // Cache flagged items for Security Status
         let flagged = results.filter { !$0.isValid }.map(\.appPath)
-        ApprovalManager.saveFlagged(.appSignature, ids: flagged)
+        ApprovalManager.recordScanResults(.appSignature, flaggedIDs: flagged)
     }
 
     nonisolated static func performScan(onProgress: @Sendable @escaping (String) -> Void) async -> [AppSignatureEntry] {
