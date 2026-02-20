@@ -51,8 +51,8 @@ SQLite-backed history of all network connections with top IPs, apps, and countri
 ### Build from Source
 
 ```bash
-git clone https://github.com/manuloop/MacSecurityGuard.git
-cd MacSecurityGuard
+git clone https://github.com/manulopeznunez/security-guard.git
+cd security-guard
 swift build
 ```
 
