@@ -110,6 +110,15 @@ final class BackgroundMonitor {
             let flaggedExts = extResults.filter { $0.risk == .high }.map(\.extensionId)
             ApprovalManager.saveFlagged(.chromeExtension, ids: flaggedExts)
 
+            // 4b. KnockKnock deep persistence scan (if installed)
+            if FileManager.default.isExecutableFile(
+                atPath: "/Applications/KnockKnock.app/Contents/MacOS/KnockKnock"
+            ) {
+                let kkResult = await KnockKnockViewModel.performScan()
+                let flaggedKK = kkResult.flaggedItems.map(\.path)
+                ApprovalManager.saveFlagged(.knockknock, ids: flaggedKK)
+            }
+
             // 5. Update UI properties on MainActor
             let score = total > 0 ? Double(enabled) / Double(total) : 0
             let scanDate = self?.formatScanDate(Date()) ?? ""
@@ -227,11 +236,13 @@ final class BackgroundMonitor {
             let name: String
             let path: String
             let signature: String
+            let chain: String
         }
         var parentCache: [Int: ParentInfo] = [:]
         for pid in uniquePIDs {
-            let info = resolveParent(pid: pid)
-            parentCache[pid] = ParentInfo(name: info.name, path: info.path, signature: info.signature)
+            let resolvedName = pidNameCache[pid] ?? ""
+            let info = resolveParent(pid: pid, processName: resolvedName)
+            parentCache[pid] = ParentInfo(name: info.name, path: info.path, signature: info.signature, chain: info.chain)
         }
 
         // 8. Detect dylib injection for network-active processes
@@ -249,7 +260,7 @@ final class BackgroundMonitor {
                 ?? bytesMap.first(where: { $0.key.hasPrefix(String(resolvedName.prefix(14))) })?.value
                 ?? (bytesIn: Int64(0), bytesOut: Int64(0))
             let geo = geoResults[conn.remoteIP] ?? (country: "Unknown", countryCode: "?", org: "")
-            let parent = parentCache[conn.pid] ?? ParentInfo(name: "", path: "", signature: "")
+            let parent = parentCache[conn.pid] ?? ParentInfo(name: "", path: "", signature: "", chain: "")
             let injection = injectionCache[conn.pid] ?? ""
 
             return ConnectionSnapshot(
@@ -266,13 +277,19 @@ final class BackgroundMonitor {
                 parentName: parent.name,
                 parentPath: parent.path,
                 parentSignature: parent.signature,
-                injectionRisk: injection
+                injectionRisk: injection,
+                parentChain: parent.chain
             )
         }
     }
 
     /// Walk the parent process chain (max 5 hops) until we find a signed process or reach launchd (PID 1).
-    nonisolated private static func resolveParent(pid: Int) -> (name: String, path: String, signature: String) {
+    /// Falls back to detecting the .app bundle from the process's own executable path.
+    /// Returns the signed parent info plus the full chain string for display.
+    nonisolated private static func resolveParent(pid: Int, processName: String) -> (name: String, path: String, signature: String, chain: String) {
+        var chainHops: [(name: String, pid: Int)] = []
+
+        // Strategy 1: Walk the PPID chain looking for a signed parent
         var currentPID = pid
         for _ in 0..<5 {
             let ppidResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(currentPID), "-o", "ppid="])
@@ -284,23 +301,75 @@ final class BackgroundMonitor {
             guard !parentPath.isEmpty else { break }
 
             let parentName = URL(fileURLWithPath: parentPath).lastPathComponent
+            chainHops.append((name: parentName, pid: ppid))
 
-            // Check if this parent binary is code-signed
             let verifyResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", parentPath])
             if verifyResult.exitCode == 0 {
-                let infoResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-dvvv", parentPath])
-                let infoText = infoResult.output + "\n" + infoResult.error
-                var authority = ""
-                if let line = infoText.components(separatedBy: "\n").first(where: { $0.hasPrefix("Authority=") }),
-                   let range = line.range(of: "Authority=") {
-                    authority = String(line[range.upperBound...])
-                }
-                return (name: parentName, path: parentPath, signature: authority)
+                let authority = extractAuthority(path: parentPath)
+                let chain = buildChainString(processName: processName, pid: pid, hops: chainHops, authority: authority)
+                return (name: parentName, path: parentPath, signature: authority, chain: chain)
             }
 
             currentPID = ppid
         }
-        return (name: "", path: "", signature: "")
+
+        // Strategy 2: Find the .app bundle containing this process's binary
+        let procPath = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !procPath.isEmpty, let appBundle = findAppBundle(in: procPath) {
+            let appName = URL(fileURLWithPath: appBundle).deletingPathExtension().lastPathComponent
+            let verifyResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", appBundle])
+            if verifyResult.exitCode == 0 {
+                let authority = extractAuthority(path: appBundle)
+                let chain = "\(processName.isEmpty ? "?" : processName) (\(pid)) → \(appName) [\(authority)]"
+                return (name: appName, path: appBundle, signature: authority, chain: chain)
+            }
+        }
+
+        // No signed parent found — return partial chain if we have hops
+        if !chainHops.isEmpty {
+            let chain = buildChainString(processName: processName, pid: pid, hops: chainHops, authority: "unsigned")
+            return (name: "", path: "", signature: "", chain: chain)
+        }
+
+        return (name: "", path: "", signature: "", chain: "")
+    }
+
+    /// Build a readable chain string: "process (PID) → parent (PID) → ... → signedApp [Authority]"
+    nonisolated private static func buildChainString(processName: String, pid: Int, hops: [(name: String, pid: Int)], authority: String) -> String {
+        var parts = ["\(processName.isEmpty ? "?" : processName) (\(pid))"]
+        for (i, hop) in hops.enumerated() {
+            if i == hops.count - 1 {
+                parts.append("\(hop.name) [\(authority)]")
+            } else {
+                parts.append("\(hop.name) (\(hop.pid))")
+            }
+        }
+        return parts.joined(separator: " → ")
+    }
+
+    /// Extract the first Authority= line from codesign output.
+    nonisolated private static func extractAuthority(path: String) -> String {
+        let infoResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-dvvv", path])
+        let infoText = infoResult.output + "\n" + infoResult.error
+        if let line = infoText.components(separatedBy: "\n").first(where: { $0.hasPrefix("Authority=") }),
+           let range = line.range(of: "Authority=") {
+            return String(line[range.upperBound...])
+        }
+        return ""
+    }
+
+    /// Find the outermost .app bundle in a file path.
+    /// "/Applications/Chrome.app/Contents/Frameworks/Helper.app/.../Helper" → "/Applications/Chrome.app"
+    nonisolated private static func findAppBundle(in path: String) -> String? {
+        let components = path.components(separatedBy: "/")
+        for (i, component) in components.enumerated() where component.hasSuffix(".app") {
+            let bundlePath = components[0...i].joined(separator: "/")
+            if FileManager.default.fileExists(atPath: bundlePath) {
+                return bundlePath
+            }
+        }
+        return nil
     }
 
     /// Check a process for signs of dylib injection.
@@ -332,7 +401,7 @@ final class BackgroundMonitor {
                     var dylibPath = String(line[slashRange.lowerBound...])
                         .trimmingCharacters(in: .whitespaces)
                     if let dylibEnd = dylibPath.range(of: ".dylib") {
-                        dylibPath = String(dylibPath[...dylibEnd.upperBound])
+                        dylibPath = String(dylibPath[..<dylibEnd.upperBound])
                             .trimmingCharacters(in: .whitespaces)
                     }
                     guard !dylibPath.isEmpty, !checkedPaths.contains(dylibPath) else { continue }

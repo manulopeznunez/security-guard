@@ -22,6 +22,11 @@ struct ContentView: View {
                         Label("Persistence", systemImage: "clock.arrow.circlepath")
                     }
 
+                KnockKnockView()
+                    .tabItem {
+                        Label("KnockKnock", systemImage: "door.left.hand.open")
+                    }
+
                 AppSignatureView()
                     .tabItem {
                         Label("App Signatures", systemImage: "signature")

@@ -204,30 +204,21 @@ final class SecurityStatusViewModel {
             category: .recommended
         ))
 
-        // KnockKnock
+        // KnockKnock — deep persistence scan with CLI integration
         let kkInstalled = FileManager.default.fileExists(atPath: "/Applications/KnockKnock.app")
-        results.append(SecurityItem(
-            name: "KnockKnock",
-            explanation: "Free, open-source persistence scanner by Objective-See. Does a deep scan of everything that persists on your Mac and checks it against VirusTotal. Unlike BlockBlock (always running), KnockKnock is a manual scanner you run when you want.",
-            howToUse: kkInstalled
-                ? """
-                Open KnockKnock from /Applications (or Spotlight: Cmd+Space, type 'KnockKnock'). \
-                Click 'Start Scan'. It scans all persistence locations on your Mac. \
-                Results are color-coded: items flagged by VirusTotal appear in red. \
-                Green = known/signed. Gray = unsigned but not flagged. \
-                Run it once a month as a health check, or whenever something feels off. \
-                Tip: click 'Show all items' to see Apple items too.
-                """
-                : "Press 'Install' to download via Homebrew. After installation, open KnockKnock from /Applications. It doesn't run in the background — just open it when you want to scan.",
-            description: kkInstalled
-                ? "Installed — open it to do a full persistence scan"
-                : "Not installed — useful for monthly security audits",
-            status: kkInstalled ? .enabled : .disabled,
-            action: kkInstalled
-                ? .openURL(url: "/Applications/KnockKnock.app")
-                : .installBrew(formula: "knockknock"),
-            category: .recommended
-        ))
+        if kkInstalled {
+            appendKnockKnockCard(&results)
+        } else {
+            results.append(SecurityItem(
+                name: "KnockKnock",
+                explanation: "Free, open-source persistence scanner by Objective-See. Scans 20+ persistence categories and checks against VirusTotal.",
+                howToUse: "Press 'Install' to download via Homebrew. After installation, use 'Scan All' to run it automatically or go to the KnockKnock tab.",
+                description: "Not installed — recommended for deep persistence audits",
+                status: .disabled,
+                action: .installBrew(formula: "knockknock"),
+                category: .recommended
+            ))
+        }
 
         // MARK: - Blind Spots
 
@@ -398,7 +389,70 @@ final class SecurityStatusViewModel {
         let flaggedExts = extResults.filter { $0.risk == .high }.map(\.extensionId)
         ApprovalManager.saveFlagged(.chromeExtension, ids: flaggedExts)
 
+        if FileManager.default.isExecutableFile(
+            atPath: "/Applications/KnockKnock.app/Contents/MacOS/KnockKnock"
+        ) {
+            actionInProgress = "Running KnockKnock deep scan..."
+            let kkResult = await KnockKnockViewModel.performScan()
+            let flaggedKK = kkResult.flaggedItems.map(\.path)
+            ApprovalManager.saveFlagged(.knockknock, ids: flaggedKK)
+        }
+
         actionInProgress = nil
         await refresh()
+    }
+
+    // MARK: - KnockKnock card
+
+    nonisolated private static func appendKnockKnockCard(
+        _ results: inout [SecurityItem]
+    ) {
+        guard ApprovalManager.hasBeenScanned(.knockknock) else {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan powered by KnockKnock CLI (Objective-See). Scans 20+ categories including LaunchItems, Extensions, Shell configs, and more.",
+                howToUse: "Press 'Scan All' to run KnockKnock automatically, or go to the KnockKnock tab. Requires Full Disk Access.",
+                description: "Not scanned yet — run 'Scan All' or use the KnockKnock tab",
+                status: .disabled,
+                action: .none,
+                category: .recommended
+            ))
+            return
+        }
+
+        let flagged = ApprovalManager.flaggedIDs(for: .knockknock)
+        let pending = ApprovalManager.pendingCount(for: .knockknock)
+
+        if flagged.isEmpty {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan powered by KnockKnock CLI (Objective-See). All persistent items are properly signed.",
+                howToUse: "No action needed. All persistence items have valid signatures. Re-run periodically to check for changes.",
+                description: "Last scan: all clear — no unsigned or flagged items",
+                status: .enabled,
+                action: .none,
+                category: .recommended
+            ))
+        } else if pending > 0 {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan found unsigned or suspicious items. Review them in the KnockKnock tab.",
+                howToUse: "Go to the KnockKnock tab and review flagged items. Approve items you recognize.",
+                description: "\(pending) unsigned/flagged item\(pending == 1 ? "" : "s") pending review",
+                status: .disabled,
+                action: .none,
+                category: .recommended
+            ))
+        } else {
+            results.append(SecurityItem(
+                name: "KnockKnock Persistence Scan",
+                explanation: "Deep persistence scan powered by KnockKnock CLI (Objective-See). All flagged items have been reviewed.",
+                howToUse: "All flagged items reviewed. Re-run periodically to check for new persistence items.",
+                description: "\(flagged.count) item\(flagged.count == 1 ? "" : "s") reviewed and approved",
+                status: .enabled,
+                action: .none,
+                category: .recommended
+            ))
+        }
     }
 }

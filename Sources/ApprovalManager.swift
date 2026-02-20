@@ -9,6 +9,7 @@ enum ApprovalManager {
         case persistence = "persistence"
         case appSignature = "app"
         case chromeExtension = "extension"
+        case knockknock = "knockknock"
     }
 
     private static let key = "ApprovedSecurityItems"

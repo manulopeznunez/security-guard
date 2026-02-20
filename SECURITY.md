@@ -22,6 +22,7 @@ MacSecurityGuard invokes the following macOS system binaries. All paths are abso
 | osascript | `/usr/bin/osascript` | Login items via AppleScript | 10s |
 | open | `/usr/bin/open` | Open URLs/apps | 10s |
 | env | `/usr/bin/env` | Find brew for tool installation | 120s |
+| KnockKnock | `/Applications/KnockKnock.app/Contents/MacOS/KnockKnock` | Deep persistence scan (CLI mode) | 180s |
 
 ## External Network Endpoints
 

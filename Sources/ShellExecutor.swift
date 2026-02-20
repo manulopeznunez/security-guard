@@ -14,6 +14,7 @@ struct ShellExecutor: Sendable {
         case local       // 10s — ps, codesign, pgrep, plutil, etc.
         case network     // 30s — curl, host, DNS lookups
         case install     // 120s — brew install
+        case scan        // 180s — KnockKnock, deep system scans
         case none        // No timeout (avoid using)
 
         var seconds: Double {
@@ -21,6 +22,7 @@ struct ShellExecutor: Sendable {
             case .local:   return 10
             case .network: return 30
             case .install: return 120
+            case .scan:    return 180
             case .none:    return .infinity
             }
         }
