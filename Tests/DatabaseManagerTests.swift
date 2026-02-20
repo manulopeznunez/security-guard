@@ -14,7 +14,11 @@ struct DatabaseManagerTests {
             organization: "'; DELETE FROM connections; --",
             bytesIn: 0,
             bytesOut: 0,
-            hostname: "test.example.com"
+            hostname: "test.example.com",
+            parentName: "",
+            parentPath: "",
+            parentSignature: "",
+            injectionRisk: ""
         )
         // Parameterized queries must prevent injection
         DatabaseManager.shared.insertSnapshot(connections: [malicious])

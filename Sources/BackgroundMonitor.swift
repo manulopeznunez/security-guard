@@ -222,7 +222,25 @@ final class BackgroundMonitor {
             }
         }
 
-        // 7. Build snapshots
+        // 7. Resolve parent process chain for each unique PID
+        struct ParentInfo {
+            let name: String
+            let path: String
+            let signature: String
+        }
+        var parentCache: [Int: ParentInfo] = [:]
+        for pid in uniquePIDs {
+            let info = resolveParent(pid: pid)
+            parentCache[pid] = ParentInfo(name: info.name, path: info.path, signature: info.signature)
+        }
+
+        // 8. Detect dylib injection for network-active processes
+        var injectionCache: [Int: String] = [:]
+        for pid in uniquePIDs {
+            injectionCache[pid] = detectInjection(pid: pid)
+        }
+
+        // 9. Build snapshots
         return rawConnections.map { conn in
             let resolvedName = pidNameCache[conn.pid] ?? conn.processName
             let nettopKey = "\(resolvedName).\(conn.pid)"
@@ -231,6 +249,8 @@ final class BackgroundMonitor {
                 ?? bytesMap.first(where: { $0.key.hasPrefix(String(resolvedName.prefix(14))) })?.value
                 ?? (bytesIn: Int64(0), bytesOut: Int64(0))
             let geo = geoResults[conn.remoteIP] ?? (country: "Unknown", countryCode: "?", org: "")
+            let parent = parentCache[conn.pid] ?? ParentInfo(name: "", path: "", signature: "")
+            let injection = injectionCache[conn.pid] ?? ""
 
             return ConnectionSnapshot(
                 processName: resolvedName,
@@ -242,9 +262,93 @@ final class BackgroundMonitor {
                 organization: geo.org,
                 bytesIn: bytes.bytesIn,
                 bytesOut: bytes.bytesOut,
-                hostname: hostnameCache[conn.remoteIP] ?? ""
+                hostname: hostnameCache[conn.remoteIP] ?? "",
+                parentName: parent.name,
+                parentPath: parent.path,
+                parentSignature: parent.signature,
+                injectionRisk: injection
             )
         }
+    }
+
+    /// Walk the parent process chain (max 5 hops) until we find a signed process or reach launchd (PID 1).
+    nonisolated private static func resolveParent(pid: Int) -> (name: String, path: String, signature: String) {
+        var currentPID = pid
+        for _ in 0..<5 {
+            let ppidResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(currentPID), "-o", "ppid="])
+            let ppidStr = ppidResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let ppid = Int(ppidStr), ppid > 1 else { break }
+
+            let commResult = ShellExecutor.run("/bin/ps", arguments: ["-p", String(ppid), "-o", "comm="])
+            let parentPath = commResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !parentPath.isEmpty else { break }
+
+            let parentName = URL(fileURLWithPath: parentPath).lastPathComponent
+
+            // Check if this parent binary is code-signed
+            let verifyResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", parentPath])
+            if verifyResult.exitCode == 0 {
+                let infoResult = ShellExecutor.run("/usr/bin/codesign", arguments: ["-dvvv", parentPath])
+                let infoText = infoResult.output + "\n" + infoResult.error
+                var authority = ""
+                if let line = infoText.components(separatedBy: "\n").first(where: { $0.hasPrefix("Authority=") }),
+                   let range = line.range(of: "Authority=") {
+                    authority = String(line[range.upperBound...])
+                }
+                return (name: parentName, path: parentPath, signature: authority)
+            }
+
+            currentPID = ppid
+        }
+        return (name: "", path: "", signature: "")
+    }
+
+    /// Check a process for signs of dylib injection.
+    nonisolated private static func detectInjection(pid: Int) -> String {
+        var risks: [String] = []
+
+        // Check 1: DYLD_INSERT_LIBRARIES
+        // ps environ= may be blocked by hardened runtime — that's fine (means protected)
+        let dyldResult = ShellExecutor.shell("/bin/ps eww -p \(pid) 2>/dev/null | tr '\\0' '\\n' | grep DYLD_INSERT_LIBRARIES")
+        if dyldResult.exitCode == 0 && !dyldResult.output.isEmpty {
+            let libs = dyldResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            risks.append("DYLD_INSERT_LIBRARIES: \(libs)")
+        }
+
+        // Check 2: Unsigned dylibs loaded into signed processes
+        let pidPath = ShellExecutor.run("/bin/ps", arguments: ["-p", String(pid), "-o", "comm="]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pidPath.isEmpty else { return risks.joined(separator: "; ") }
+
+        let isSigned = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", pidPath]).exitCode == 0
+        if isSigned {
+            let vmmapResult = ShellExecutor.shell("/usr/bin/vmmap \(pid) 2>/dev/null | grep '\\.dylib'")
+            if vmmapResult.exitCode == 0 {
+                let trustedPrefixes = ["/usr/lib/", "/System/", "/Library/Apple/", "/opt/homebrew/"]
+                var checkedPaths = Set<String>()
+
+                for line in vmmapResult.output.components(separatedBy: "\n") {
+                    guard let slashRange = line.range(of: "/") else { continue }
+                    var dylibPath = String(line[slashRange.lowerBound...])
+                        .trimmingCharacters(in: .whitespaces)
+                    if let dylibEnd = dylibPath.range(of: ".dylib") {
+                        dylibPath = String(dylibPath[...dylibEnd.upperBound])
+                            .trimmingCharacters(in: .whitespaces)
+                    }
+                    guard !dylibPath.isEmpty, !checkedPaths.contains(dylibPath) else { continue }
+                    checkedPaths.insert(dylibPath)
+
+                    if trustedPrefixes.contains(where: { dylibPath.hasPrefix($0) }) { continue }
+
+                    let dylibVerify = ShellExecutor.run("/usr/bin/codesign", arguments: ["-v", dylibPath])
+                    if dylibVerify.exitCode != 0 {
+                        risks.append("Unsigned dylib: \(dylibPath)")
+                    }
+                }
+            }
+        }
+
+        return risks.joined(separator: "; ")
     }
 
     nonisolated private static func parseAddressPort(_ input: String) -> (String, String) {

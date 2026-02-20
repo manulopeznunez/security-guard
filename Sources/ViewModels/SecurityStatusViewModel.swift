@@ -38,6 +38,10 @@ final class SecurityStatusViewModel {
         let results = await Self.checkAll()
         items = results
         isLoading = false
+
+        // Keep the displayed score in sync with the current result
+        let score = items.isEmpty ? 0.0 : Double(enabledCount) / Double(items.count)
+        BackgroundMonitor.shared.lastScore = score
     }
 
     func performAction(_ action: SecurityAction) async {
