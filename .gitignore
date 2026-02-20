@@ -1,0 +1,38 @@
+# Build artifacts
+.build/
+Build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# IDE
+.vscode/
+.idea/
+*.xcuserstate
+
+# Claude Code
+.claude/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Local database
+*.db
+*.db-wal
+*.db-shm
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.p12
+*.key
