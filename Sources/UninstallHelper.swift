@@ -267,9 +267,16 @@ enum UninstallHelper {
     }
 
     /// Launches Claude Code in an interactive Terminal session with the given prompt.
+    /// The prompt is passed via a temp file to avoid shell injection through crafted
+    /// app names, plist labels, or other untrusted data embedded in the prompt string.
     static func launchClaude(with prompt: String) {
-        let scriptFile = NSTemporaryDirectory() + "claude_investigate.sh"
-        let escapedPrompt = prompt.replacingOccurrences(of: "\"", with: "\\\"")
+        let uniqueID = UUID().uuidString
+        let scriptFile = NSTemporaryDirectory() + "claude_investigate_\(uniqueID).sh"
+        let promptFile = NSTemporaryDirectory() + "claude_prompt_\(uniqueID).txt"
+
+        // Write prompt to a separate file — avoids shell metacharacter injection entirely
+        try? prompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
+
         let shellScript = """
         #!/bin/bash
         CLAUDE="$HOME/.local/bin/claude"
@@ -281,10 +288,13 @@ enum UninstallHelper {
             read -p "Press Enter to close..."
             exit 1
         fi
-        exec "$CLAUDE" "\(escapedPrompt)"
+        PROMPT_FILE="\(promptFile)"
+        PROMPT=$(cat "$PROMPT_FILE")
+        rm -f "$PROMPT_FILE" "\(scriptFile)"
+        exec "$CLAUDE" "$PROMPT"
         """
         try? shellScript.write(toFile: scriptFile, atomically: true, encoding: .utf8)
-        _ = ShellExecutor.shell("chmod +x '\(scriptFile)'")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptFile)
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

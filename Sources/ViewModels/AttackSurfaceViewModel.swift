@@ -135,11 +135,18 @@ final class AttackSurfaceViewModel {
                 let keyType = parts[0]
                 let comment = parts.count >= 3 ? parts[2] : ""
 
-                // Get fingerprint
-                let fpResult = ShellExecutor.shell("echo '\(trimmed)' | ssh-keygen -l -f - 2>/dev/null")
+                // Get fingerprint — write key to temp file to avoid shell injection
+                // (authorized_keys content is untrusted and must not be interpolated into shell)
+                let tempFile = NSTemporaryDirectory() + UUID().uuidString + ".pub"
                 let fingerprint: String
-                if fpResult.exitCode == 0 {
-                    fingerprint = fpResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let _ = try? trimmed.write(toFile: tempFile, atomically: true, encoding: .utf8) {
+                    let fpResult = ShellExecutor.run("/usr/bin/ssh-keygen", arguments: ["-l", "-f", tempFile])
+                    if fpResult.exitCode == 0 {
+                        fingerprint = fpResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else {
+                        fingerprint = "Unable to read"
+                    }
+                    try? FileManager.default.removeItem(atPath: tempFile)
                 } else {
                     fingerprint = "Unable to read"
                 }
@@ -168,7 +175,7 @@ final class AttackSurfaceViewModel {
                 let permissionsOK = permissions == "600" || permissions == "400"
 
                 // Detect key type from file content
-                let typeResult = ShellExecutor.shell("ssh-keygen -l -f '\(fullPath)' 2>/dev/null")
+                let typeResult = ShellExecutor.run("/usr/bin/ssh-keygen", arguments: ["-l", "-f", fullPath])
                 let keyType: String
                 if typeResult.exitCode == 0 {
                     let parts = typeResult.output.split(separator: " ")

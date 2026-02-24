@@ -388,8 +388,10 @@ final class PermissionsViewModel {
         }
 
         // Bundle ID — try to find the app via mdfind
+        // Sanitize client to prevent Spotlight query injection via crafted bundle IDs
+        let sanitizedClient = client.replacingOccurrences(of: "'", with: "")
         let findResult = ShellExecutor.run(
-            "/usr/bin/mdfind", arguments: ["kMDItemCFBundleIdentifier == '\(client)'"],
+            "/usr/bin/mdfind", arguments: ["kMDItemCFBundleIdentifier == '\(sanitizedClient)'"],
             timeout: .local
         )
         let appPath = findResult.output
