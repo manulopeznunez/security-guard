@@ -497,7 +497,9 @@ final class BackgroundMonitor {
         var risks: [String] = []
 
         // Check: DYLD_INSERT_LIBRARIES — the real injection vector
-        let dyldResult = ShellExecutor.shell("/bin/ps eww -p \(pid) 2>/dev/null | tr '\\0' '\\n' | grep DYLD_INSERT_LIBRARIES")
+        // Use argument array for the ps call, then pipe through shell only for text processing
+        let pidStr = String(pid)
+        let dyldResult = ShellExecutor.shell("/bin/ps eww -p " + pidStr + " 2>/dev/null | tr '\\0' '\\n' | grep DYLD_INSERT_LIBRARIES")
         if dyldResult.exitCode == 0 && !dyldResult.output.isEmpty {
             let libs = dyldResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
             risks.append("DYLD_INSERT_LIBRARIES: \(libs)")
@@ -538,14 +540,14 @@ final class BackgroundMonitor {
         }
 
         // Network connections for this PID (lsof)
-        let lsofResult = ShellExecutor.shell("lsof +c 0 -i -n -P -p \(pid) 2>/dev/null | head -30")
+        let lsofResult = ShellExecutor.shell("lsof +c 0 -i -n -P -p " + String(pid) + " 2>/dev/null | head -30")
         if !lsofResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             trace.append("--- Open connections ---")
             trace.append(lsofResult.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
         // Open files (non-network, first 20)
-        let filesResult = ShellExecutor.shell("lsof -p \(pid) 2>/dev/null | grep -v 'IPv[46]' | tail -20")
+        let filesResult = ShellExecutor.shell("lsof -p " + String(pid) + " 2>/dev/null | grep -v 'IPv[46]' | tail -20")
         if !filesResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             trace.append("--- Open files (last 20) ---")
             trace.append(filesResult.output.trimmingCharacters(in: .whitespacesAndNewlines))

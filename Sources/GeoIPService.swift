@@ -171,7 +171,12 @@ private final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Se
     // When true, a pin mismatch logs a critical warning but allows the
     // connection if standard TLS validation passes. This prevents bricking
     // the GeoIP feature when the server rotates keys.
-    private static let allowFallbackOnPinMismatch = true
+    //
+    // SECURITY NOTE: Setting this to true effectively disables certificate
+    // pinning, allowing MITM attacks with any valid CA-signed certificate.
+    // Set to false for strict pinning. When false, add a backup pin hash
+    // (e.g. from a future key) to prevent bricking on key rotation.
+    private static let allowFallbackOnPinMismatch = false
 
     // ASN.1 SPKI headers (prepended to raw key before hashing for RFC 7469 compatibility)
     private static let rsaSPKIHeader: [UInt8] = [

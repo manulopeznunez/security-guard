@@ -111,7 +111,7 @@ final class DevDepsViewModel {
         guard which.exitCode == 0 else { return nil }
         let npmPath = which.output.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let result = ShellExecutor.shell("cd \(path.replacingOccurrences(of: " ", with: "\\ ")) && \(npmPath) audit --json", timeout: .network)
+        let result = ShellExecutor.run(npmPath, arguments: ["audit", "--json"], workingDirectory: path, timeout: .network)
         guard !result.output.isEmpty,
               let data = result.output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -210,7 +210,7 @@ final class DevDepsViewModel {
             )
         }
         let cargoAuditPath = which.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let result = ShellExecutor.shell("cd \(path.replacingOccurrences(of: " ", with: "\\ ")) && \(cargoAuditPath) audit --json", timeout: .network)
+        let result = ShellExecutor.run(cargoAuditPath, arguments: ["audit", "--json"], workingDirectory: path, timeout: .network)
         guard let data = result.output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let vulnSection = json["vulnerabilities"] as? [String: Any],
